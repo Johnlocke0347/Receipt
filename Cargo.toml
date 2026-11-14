@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/receipt-core",
+    "crates/acceptance-verifier-wasm",
+    "crates/near-receipt-registry",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "sha256", "std"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic", "std"] }
+bs58 = "0.5"
+base64 = "0.22"
+sha3 = "0.10"
+dcap-qvl = { version = "0.3.11", default-features = false, features = ["contract", "borsh", "std", "rustcrypto"] }
+near-sdk = { version = "=5.7.0", default-features = false, features = ["legacy"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,8 @@
+.env
+.env.*
+target/
+target_clean_*/
+.venv/
+__pycache__/
+node_modules/
+*.log

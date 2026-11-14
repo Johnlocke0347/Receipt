@@ -1,0 +1,30 @@
+[package]
+name = "near-receipt-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+receipt-core = { path = "../receipt-core", default-features = false }
+borsh.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+near-sdk.workspace = true
+getrandom = { version = "0.2", features = ["custom"] }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true, features = ["rand_core"] }
+k256.workspace = true
+base64.workspace = true
+revm = { version = "19.0", default-features = false, features = ["std"] }
+

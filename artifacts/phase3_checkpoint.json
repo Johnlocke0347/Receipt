@@ -1,0 +1,39 @@
+{
+  "step1_deploy_wasm_tx": "DEfUmG5F9gsuaYhX7A8Kz9WfZiFjH4CEKJPhYcXQqUv1",
+  "step1_init_tx": "E8PzpxoTcz6xFDshYocegkVCDXpNd4yGzeUfFpfTVkkV",
+  "step1_sync_measurements_tx": "3Wm2R2Jb93ZiXQubfwACCjmFAqJiUWgZ5Wy88sBvSgxj",
+  "step2_deploy_usdc_tx": "0xead18ea5db9bc9ed1092ea69a47971259de1f16a806318a5aa49456a40a191d7",
+  "mock_usdc_address": "0x99ac11cf7b392d27074253937163ad1a82786e8a",
+  "step2_deploy_vault_tx": "0x26cdc897ca4fbd06af1ddddf23f2c1b416b7ff6af7f8a7e06e2e593943486ad0",
+  "vault_address": "0xf59f9d39f5fb76880bdc64fbcb7613e770d195e8",
+  "lender_id_hex": "c12dccd1d70cf857093b163b110f1a13bb928a8f4a5cb9b951b06e5468af2669",
+  "step2_fund_vault_tx": "0xe70d318ebfc8b9cbd1eee78f0b02ec0356e820511facea6069b97bc5e3b6c919",
+  "step2_configure_vault_near_tx": "DWnTUSxw7TV76ZUWMnbTGy8irtRJ4vbhReoPvoetRsSd",
+  "receipt_nonce": 1,
+  "receipt_id_hex": "43b46460703355ceea1364612a7b3efea9a3cc96cf402ddf22ec161521a2768c",
+  "step3_pin_wasm_tx": "AiyrJfw5eNE7dqRDCgLeUvLNNXukWhCDJoxzGKqWD66z",
+  "step3_register_receipt_tx": "A5QEf2jnvB2nNCRVra249btAjt1h52TSV61AZ4bmQKBu",
+  "step4_authorize_loan_tx": "FNsbX3M42GhWhQewi8kKFcNWi2xgASW9kPcYBTq6LeBL",
+  "loan_deadline": 1794657177,
+  "step5_draw_credit_tx": "0xf3ee1f5cfc78729821e7409dcecd31cfd29ae885dde5160435dd88ca9a708283",
+  "step5_draw_credit_block_hash": "0xb8ecab257cf946f17102f6df5c834177169061c4065f5e7de74c59321020365e",
+  "step5_draw_credit_log0": {
+    "address": "0xf59f9d39f5fb76880bdc64fbcb7613e770d195e8",
+    "topics": [
+      "0xdff854f8b1899f7406ec910c80bdb6f254706d8c4386a95fd702cb92525ab046",
+      "0x43b46460703355ceea1364612a7b3efea9a3cc96cf402ddf22ec161521a2768c",
+      "0x000000000000000000000000f4e355089852f302a69e6b6cf8b6d83dc09d9a42",
+      "0xc12dccd1d70cf857093b163b110f1a13bb928a8f4a5cb9b951b06e5468af2669"
+    ],
+    "data": "0x000000000000000000000000000000000000000000000000000000000ee6b280d578d155cfec13066c6ecd7d6f4ce46e7037698958ca2e7d9ecd0eeb9c3dfe4f",
+    "blockHash": "0xb8ecab257cf946f17102f6df5c834177169061c4065f5e7de74c59321020365e",
+    "blockNumber": "0x37ec92c",
+    "blockTimestamp": "0x6af82f95",
+    "transactionHash": "0xf3ee1f5cfc78729821e7409dcecd31cfd29ae885dde5160435dd88ca9a708283",
+    "transactionIndex": "0x2",
+    "logIndex": "0x0",
+    "removed": false,
+    "blockTimestampMs": "0x1a1d979e060"
+  },
+  "step6_verify_consequence_tx": "3kgoyP8dr6nANZgzYmsrjp9PB3xPr29uD1oPTR25vJ6Y"
+}
