@@ -164,8 +164,20 @@ sequenceDiagram
 *   **Confidential Intents Bridge:** NEAR's Confidential Intents private shard is mainnet-only and does not execute arbitrary contracts. To demonstrate the loop on testnet, we use a clearly labeled `TestnetConfidentialSettlementBridge` (`crates/receipt-core/src/confidential.rs`) alongside our NEP-413 1Click `OneClickIntentBuilder` to generate the salted commitment (`SHA256("RECEIPT_CONFIDENTIAL_V1" || intent_id || amount_le16 || currency_hash || buyer_salt)`) for the TDX acceptance test.
 *   **TEE Capabilities:** Intel TDX proves code, input, and output integrity inside an approved enclave (verified against 129 approved OutLayer measurements on `worker.outlayer.testnet`, plus full off-chain Intel DCAP PCK/CRL/TCB/QE verification via `dcap-qvl` in `crates/receipt-core/src/tdx.rs`). It does not judge subjective fairness; the buyer and provider co-sign the acceptance criteria.
 *   **Live Testnet Evidence:** The TDX attestation, Chain Signatures loan authorization, and MPC verification are all live and verifiable on testnet.
-
+- **What the live loop attests:** the live testnet receipt is backed by a genuine OutLayer Intel TDX quote (OutLayer task 3000, WASM hash `0eeb1b87…`), pinned as the expected WASM hash. Our own `acceptance-verifier-wasm` is reproducibly built and tested under wasmtime (wasip1 + wasip2); running it through OutLayer and registering its quote is the next step. The registry's TDX path (DCAP, approved measurements, report_data binding) runs on the live registry against this real quote.
 ---
+
+
+
+## Known Gaps (Testnet Scope)
+
+- **Collusion / sybil pairs:** a buyer and provider controlled by one party can co-sign a fake job. Next: staking, per-pair credit caps, distinct-counterparty limits.
+- **Outcome binding:** the registry checks quote ↔ hash binding but does not parse the enclave output, so `PASS` is asserted by the co-signers, and one quote can currently back more than one receipt. Next: commit the outcome inside the enclave output hash and consume quote task IDs on registration.
+- **`authorize_loan` is permissionless:** borrower, principal and deadline are caller-supplied. Next: bind borrower + credit limit into the co-signed receipt and restrict the call to the provider.
+- **Credit, not yet a loan:** the vault disburses only. Repayment, interest, collateral and liquidation are not built.
+- **Self-reported acceptance metrics:** the enclave applies the rules faithfully to the supplied manifest; it cannot verify the manifest's numbers are true.
+- **Demo keys:** buyer/provider keys are fixed in `demo_e2e.py`.
+- **Trust assumptions:** Intel TDX, OutLayer's 129 approved measurements, NEAR MPC threshold.
 
 ## Repository Structure & How to Reproduce
 
