@@ -1,3 +1,5 @@
+> **Post-Submission Hardening Branch (`hardening-post-submission`):** The original hackathon submission is preserved unmodified on [`main` / tag `submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) (`92deb5d69c8fca1f5aa1b0a38833f0223ca96ef7`). This branch contains post-submission security hardening fixes, negative regression tests, and an Apache-2.0 `LICENSE`. See [`SECURITY-HARDENING.md`](./SECURITY-HARDENING.md) and [`docs/OUTLAYER_TODO.md`](./docs/OUTLAYER_TODO.md) for full details.
+
 # RECEIPT — Cross-Chain Agent Credit Backed by Private, Attested Work
 
 RECEIPT is a cross-chain reputation and credit primitive for autonomous agents. Every completed job produces a portable work credential that is co-signed by the buyer and provider, attested by an Intel TDX enclave, and turned into cross-chain collateral using NEAR Chain Signatures and MPC Foreign-Chain Verification (`Read RPC`).

@@ -1,24 +1,26 @@
-"""Phase 3 Live End-to-End Orchestrator for RECEIPT (NEAR Testnet <-> Base Sepolia).
+"""Phase 3 Hardened Live End-to-End Orchestrator for RECEIPT (NEAR Testnet <-> Base Sepolia).
 
 Executes the full cross-chain loop with persistent step-by-step checkpointing:
-1. Deploy `near_receipt_registry.wasm` to `receipt-registry.testnet`, initialize it,
-   sync the 129 approved OutLayer worker TDX measurements from `worker.outlayer.testnet`,
-   and verify `derive_vault_authorized_signer_evm_address()`.
+1. Ensure `receipt-v2-test-20261121.testnet` exists, deploy hardened `near_receipt_registry.wasm`,
+   initialize it, sync approved OutLayer worker TDX measurements from `worker.outlayer.testnet`,
+   and query `derive_vault_authorized_signer_evm_address()`.
 2. Deploy `MockCreditUSDC` and `ReceiptCreditVault` (`nearAuthorizedSigner =
-   0x6cb5858d8310045e4f2caea4e1231e4980af4e4b`) to Base Sepolia (`chainId = 84532`),
-   fund the vault with 500,000 mUSDC, and pin the vault address on `receipt-registry.testnet`.
-3. Pin the expected OutLayer WASM hash on `receipt-registry.testnet` and register a
-   Buyer + Provider Ed25519 co-signed `ReceiptV1` backed by a genuine OutLayer Intel TDX
-   Quote v4 (`task_id = 3000`, verified against `worker.outlayer.testnet`).
-4. Request a cross-chain EIP-712 Loan Authorization via `receipt-registry.testnet::authorize_loan`,
+   on-chain derived EVM signer`) to Base Sepolia (`chainId = 84532`),
+   fund the vault with 500,000 mUSDC, and pin the vault address on the NEAR registry.
+3. Execute our FastFS-hosted `acceptance-verifier-wasm` (`wasm32-wasip1`) live inside OutLayer
+   Intel TDX via `outlayer.testnet::request_execution`, fetch the TDX Quote v4 attestation,
+   pin its `wasm_hash` on NEAR, and register a hardened Buyer + Provider Ed25519 co-signed
+   `ReceiptV1` (binding `borrower_evm_address`, `max_credit_principal`, `RECEIPT_OUTCOME_OUTPUT_V1`,
+   and consuming `task_id`).
+4. Request a cross-chain EIP-712 Loan Authorization via `authorize_loan` as the provider account,
    which invokes `v1.signer-prod.testnet::sign` (`domain_id: 0`, path `"receipt-credit-vault-v1"`).
 5. Broadcast `ReceiptCreditVault.drawCredit(...)` on Base Sepolia (`chainId = 84532`),
    verify the borrower receives `250,000,000` (`250 mUSDC`), and extract the emitted
    `LoanDrawn` log (`log_index`).
 6. Submit the Base Sepolia transaction hash, block hash, and `LoanDrawn` log to
-   `receipt-registry.testnet::verify_loan_consequence` (`finality = "Latest"`), which invokes
+   `verify_loan_consequence` (`finality = "Latest"`), which invokes
    `v1.signer-prod.testnet::verify_foreign_transaction` (`domain_id: 3`, Base).
-7. Query `verify_consequence_proof` and `get_provider_credit_graph` on `receipt-registry.testnet`
+7. Query `verify_consequence_proof`, `is_task_id_consumed`, and `get_provider_credit_graph` on NEAR
    to verify `consequence_state == "ConsumedVerified"` and `is_mpc_consequence_verified == True`.
 """
 
@@ -40,16 +42,19 @@ from Crypto.Hash import keccak
 from dotenv import dotenv_values
 
 NEAR_RPC_URL = "https://rpc.testnet.near.org"
-DERIVED_MPC_PUBKEY_NEAR = (
-    "secp256k1:4BUaArkKFhhnaUmFaxQ3ZDFJKScvpShfeQSo2rsDgLMj3SvfFCuVvZgtDbsntZYmg"
-    "ShfPynEJhYm6GiuEShHvzMS"
-)
-EXPECTED_AUTHORIZED_SIGNER_EVM = "0x6cb5858d8310045e4f2caea4e1231e4980af4e4b"
+NEAR_HELPER_URL = "https://helper.testnet.near.org/account"
+DEFAULT_V2_REGISTRY_ACCOUNT = "receipt-v2-test-20261121.testnet"
 BASE_SEPOLIA_CHAIN_ID = 84532
 SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+OUTLAYER_WASIP1_WASM_URL = (
+    "https://test.fastfs.io/receipt-registry.testnet/outlayer.testnet/"
+    "9465bd664f1cfa7ce54731ba4b5c411b4444ebde9064351b5e2b1761cc467dd1.wasm"
+)
+OUTLAYER_WASIP1_WASM_HASH = "9465bd664f1cfa7ce54731ba4b5c411b4444ebde9064351b5e2b1761cc467dd1"
+OUTLAYER_API_BASE = "https://testnet-api.outlayer.ai"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CHECKPOINT_PATH = REPO_ROOT / "artifacts" / "phase3_checkpoint.json"
+CHECKPOINT_PATH = REPO_ROOT / "artifacts" / "phase3_v2_checkpoint.json"
 WASM_REGISTRY_PATH = (
     REPO_ROOT / "target" / "wasm32-unknown-unknown" / "release" / "near_receipt_registry.wasm"
 )
@@ -66,9 +71,6 @@ VAULT_BIN_PATH = (
     / "base-sepolia"
     / "artifacts"
     / "ReceiptCreditVault_sol_ReceiptCreditVault.bin"
-)
-ATTESTATION_3000_PATH = (
-    REPO_ROOT / "crates" / "receipt-core" / "tests" / "fixtures" / "outlayer_attestation_3000.json"
 )
 
 
@@ -431,6 +433,148 @@ def near_function_call(
     return tx_hash_b58, outcome
 
 
+def ensure_near_account(account_id: str, near_priv_key: str) -> None:
+    """Create the target NEAR Testnet account via helper faucet if it does not already exist."""
+    probe = httpx.post(
+        NEAR_RPC_URL,
+        json={
+            "jsonrpc": "2.0",
+            "id": "acct",
+            "method": "query",
+            "params": {
+                "request_type": "view_account",
+                "finality": "final",
+                "account_id": account_id,
+            },
+        },
+        timeout=20.0,
+    ).json()
+    if "result" in probe:
+        return
+
+    if not near_priv_key.startswith("ed25519:"):
+        raise ValueError("NEAR private key must start with ed25519:")
+    key_bytes = base58.b58decode(near_priv_key.removeprefix("ed25519:"))
+    signing_key = nacl.signing.SigningKey(key_bytes[:32])
+    pub_b58 = "ed25519:" + base58.b58encode(bytes(signing_key.verify_key)).decode("ascii")
+    resp = httpx.post(
+        NEAR_HELPER_URL,
+        json={"newAccountId": account_id, "newAccountPublicKey": pub_b58},
+        timeout=30.0,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to provision NEAR Testnet account {account_id}: "
+            f"{resp.status_code} {resp.text}"
+        )
+
+
+def compute_settlement_commitment(principal_amount: int) -> bytes:
+    """Derive the salted 32-byte confidential settlement commitment."""
+    intent_id = hashlib.sha256(b"RECEIPT_PHASE3_PRIVATE_INTENT_V1").digest()
+    currency_hash = hashlib.sha256(b"mUSDC:base-sepolia:84532").digest()
+    buyer_salt = hashlib.sha256(b"RECEIPT_PHASE3_BUYER_SALT_V1").digest()
+    return hashlib.sha256(
+        b"RECEIPT_CONFIDENTIAL_V1"
+        + intent_id
+        + principal_amount.to_bytes(16, "little")
+        + currency_hash
+        + buyer_salt
+    ).digest()
+
+
+def execute_self_verifier_on_outlayer(
+    caller_account: str,
+    near_priv_key: str,
+    principal_amount: int,
+) -> tuple[str, dict[str, Any]]:
+    """Run our FastFS-hosted `acceptance-verifier-wasm` live inside OutLayer Intel TDX."""
+    settlement_hex = compute_settlement_commitment(principal_amount).hex()
+    job_spec_hex = hashlib.sha256(b"RECEIPT_PHASE3_JOB_SPEC_V1").hexdigest()
+    test_suite_hex = hashlib.sha256(b"RECEIPT_PHASE3_TEST_SUITE_V1").hexdigest()
+    input_data = json.dumps(
+        {
+            "job_spec_commitment": job_spec_hex,
+            "confidential_settlement_commitment": settlement_hex,
+            "deliverable_payload": {
+                "audit_findings": [{"id": 1, "sev": "low"}],
+                "invariants_checked": 12,
+                "test_suite_digest": test_suite_hex,
+                "deterministic_score": 98,
+            },
+            "acceptance_rules": {
+                "min_invariants": 10,
+                "required_test_digest": test_suite_hex,
+                "min_score": 90,
+            },
+        },
+        separators=(",", ":"),
+    )
+    args = {
+        "source": {
+            "WasmUrl": {
+                "url": OUTLAYER_WASIP1_WASM_URL,
+                "hash": OUTLAYER_WASIP1_WASM_HASH,
+                "build_target": "wasm32-wasip1",
+            }
+        },
+        "resource_limits": {
+            "max_instructions": 1_000_000_000,
+            "max_memory_mb": 128,
+            "max_execution_seconds": 60,
+        },
+        "input_data": input_data,
+        "response_format": "Json",
+    }
+    exec_tx, outcome = near_function_call(
+        caller_account,
+        near_priv_key,
+        "outlayer.testnet",
+        "request_execution",
+        args,
+        gas=300_000_000_000_000,
+        deposit=50_000_000_000_000_000_000_000,
+    )
+    status = outcome.get("status", {})
+    sv_b64 = status.get("SuccessValue") if isinstance(status, dict) else None
+    if not isinstance(sv_b64, str) or not sv_b64:
+        raise RuntimeError(f"OutLayer self-verifier execution produced no output: {outcome}")
+    sv_bytes = base64.b64decode(sv_b64)
+    ver_out = cast(dict[str, Any], json.loads(sv_bytes.decode("utf-8")))
+    if ver_out.get("outcome") != "PASS":
+        raise RuntimeError(f"OutLayer self-verifier returned non-PASS outcome: {ver_out}")
+
+    req_id: int | None = None
+    for receipt_out in outcome.get("receipts_outcome", []):
+        for log_entry in receipt_out.get("outcome", {}).get("logs", []):
+            if "execution_requested" in log_entry:
+                ev = json.loads(log_entry.removeprefix("EVENT_JSON:"))
+                req_data = json.loads(ev["data"][0]["request_data"])
+                req_id = int(req_data["request_id"])
+    if req_id is None:
+        raise RuntimeError(f"Could not extract OutLayer request_id from tx {exec_tx}")
+
+    attestation: dict[str, Any] | None = None
+    for _ in range(15):
+        resp = httpx.get(
+            f"{OUTLAYER_API_BASE}/attestations/by-request/{req_id}",
+            timeout=15.0,
+        )
+        if resp.status_code == 200:
+            attestation = cast(dict[str, Any], resp.json())
+            break
+        time.sleep(2.0)
+    if attestation is None:
+        raise RuntimeError(f"Timed out fetching OutLayer attestation for request_id={req_id}")
+    if attestation.get("wasm_hash") != OUTLAYER_WASIP1_WASM_HASH:
+        raise RuntimeError(
+            f"Unexpected OutLayer attestation wasm_hash: {attestation.get('wasm_hash')}"
+        )
+    if attestation.get("output_hash") != hashlib.sha256(sv_bytes).hexdigest():
+        raise RuntimeError("OutLayer attestation output_hash does not match stdout bytes")
+    return exec_tx, attestation
+
+
 # ---------------------------------------------------------------------------
 # ReceiptV1 Construction & Ed25519 Co-Signing
 # ---------------------------------------------------------------------------
@@ -441,9 +585,10 @@ def build_and_sign_receipt_v1(
     provider_identity: str,
     registry_account_id: str,
     nonce: int,
-    principal_amount: int,
+    borrower_evm: str,
+    max_credit_principal: int,
 ) -> tuple[dict[str, Any], list[int], dict[str, Any]]:
-    """Construct canonical `ReceiptV1`, `tdx_quote_bytes`, and `TaskHashInputs`."""
+    """Construct canonical hardened `ReceiptV1`, `tdx_quote_bytes`, and `TaskHashInputs`."""
     quote_bytes = base64.b64decode(attestation["tdx_quote"].strip())
     mrtd = quote_bytes[184:232]
     rtmrs = quote_bytes[376:568]
@@ -451,22 +596,20 @@ def build_and_sign_receipt_v1(
 
     wasm_hash = bytes.fromhex(attestation["wasm_hash"])
     input_hash = bytes.fromhex(attestation["input_hash"])
-    output_hash = bytes.fromhex(attestation["output_hash"])
-
-    intent_id = hashlib.sha256(b"RECEIPT_PHASE3_PRIVATE_INTENT_V1").digest()
-    currency_hash = hashlib.sha256(b"mUSDC:base-sepolia:84532").digest()
-    buyer_salt = hashlib.sha256(b"RECEIPT_PHASE3_BUYER_SALT_V1").digest()
-
-    settlement_commitment = hashlib.sha256(
-        b"RECEIPT_CONFIDENTIAL_V1"
-        + intent_id
-        + principal_amount.to_bytes(16, "little")
-        + currency_hash
-        + buyer_salt
+    raw_output_hash = bytes.fromhex(attestation["output_hash"])
+    # Commit PASS (1) into receipt.output_hash per Fix 4 while keeping raw output_hash in task_meta.
+    committed_output_hash = hashlib.sha256(
+        b"RECEIPT_OUTCOME_OUTPUT_V1" + b"\x01" + raw_output_hash
     ).digest()
 
+    settlement_commitment = compute_settlement_commitment(max_credit_principal)
+
     evidence_commitment = hashlib.sha256(
-        b"RECEIPT_EVIDENCE_V1" + wasm_hash + input_hash + output_hash + settlement_commitment
+        b"RECEIPT_EVIDENCE_V1"
+        + wasm_hash
+        + input_hash
+        + committed_output_hash
+        + settlement_commitment
     ).digest()
 
     receipt_id_bytes = hashlib.sha256(
@@ -475,6 +618,10 @@ def build_and_sign_receipt_v1(
         + struct.pack("<Q", nonce)
         + evidence_commitment
     ).digest()
+
+    borrower_bytes = bytes.fromhex(borrower_evm.removeprefix("0x"))
+    if len(borrower_bytes) != 20:
+        raise ValueError(f"Expected 20-byte borrower address, got {len(borrower_bytes)}")
 
     buyer_sk = nacl.signing.SigningKey(bytes([0x10] * 32))
     provider_sk = nacl.signing.SigningKey(bytes([0x20] * 32))
@@ -491,13 +638,15 @@ def build_and_sign_receipt_v1(
     signing_body += verifier_measurement
     signing_body += wasm_hash
     signing_body += input_hash
-    signing_body += output_hash
+    signing_body += committed_output_hash
     signing_body += evidence_commitment
     signing_body += buyer_pk
     signing_body += provider_pk
     signing_body += struct.pack("<Q", nonce)
     signing_body += struct.pack("<Q", created_at)
     signing_body += settlement_commitment
+    signing_body += borrower_bytes
+    signing_body += max_credit_principal.to_bytes(16, "little")
 
     chain_prefix = borsh_str("testnet") + borsh_str(registry_account_id)
     buyer_digest = hashlib.sha256(
@@ -519,7 +668,7 @@ def build_and_sign_receipt_v1(
         "verifier_measurement": verifier_measurement.hex(),
         "wasm_hash": wasm_hash.hex(),
         "input_hash": input_hash.hex(),
-        "output_hash": output_hash.hex(),
+        "output_hash": committed_output_hash.hex(),
         "evidence_commitment": evidence_commitment.hex(),
         "buyer_pubkey": buyer_pk.hex(),
         "provider_pubkey": provider_pk.hex(),
@@ -528,6 +677,8 @@ def build_and_sign_receipt_v1(
         "nonce": nonce,
         "created_at": created_at,
         "confidential_settlement_commitment": settlement_commitment.hex(),
+        "borrower_evm_address": borrower_bytes.hex(),
+        "max_credit_principal": max_credit_principal,
         "consequence_state": "RegisteredVerified",
         "foreign_chain_id": None,
         "foreign_tx_hash": None,
@@ -543,7 +694,7 @@ def build_and_sign_receipt_v1(
         "build_target": attestation.get("build_target"),
         "wasm_hash": wasm_hash.hex(),
         "input_hash": input_hash.hex(),
-        "output_hash": output_hash.hex(),
+        "output_hash": raw_output_hash.hex(),
         "block_height": attestation.get("block_height"),
         "caller_account_id": attestation.get("caller_account_id"),
         "project_id": attestation.get("project_id"),
@@ -563,27 +714,26 @@ def build_and_sign_receipt_v1(
 def main() -> None:
     """Execute Phase 3 end-to-end deployment and cross-chain verification with checkpointing."""
     env = dotenv_values(REPO_ROOT / ".env")
-    near_account = env.get("NEAR_ACCOUNT_ID") or ""
     near_priv_key = env.get("NEAR_PRIVATE_KEY") or ""
+    registry_account = (env.get("NEAR_REGISTRY_ACCOUNT_ID") or "").strip() or (
+        DEFAULT_V2_REGISTRY_ACCOUNT
+    )
     base_rpc_url = env.get("BASE_SEPOLIA_RPC_URL") or ""
     base_priv_key = env.get("BASE_SEPOLIA_PRIVATE_KEY") or ""
 
-    if not (near_account and near_priv_key and base_rpc_url and base_priv_key):
+    if not (near_priv_key and base_rpc_url and base_priv_key):
         raise RuntimeError(
             "Missing required credentials in .env "
-            "(NEAR_ACCOUNT_ID, NEAR_PRIVATE_KEY, BASE_SEPOLIA_RPC_URL, BASE_SEPOLIA_PRIVATE_KEY)"
+            "(NEAR_PRIVATE_KEY, BASE_SEPOLIA_RPC_URL, BASE_SEPOLIA_PRIVATE_KEY)"
         )
 
-    derived_signer = derive_evm_address_from_near_secp256k1(DERIVED_MPC_PUBKEY_NEAR)
-    if derived_signer != EXPECTED_AUTHORIZED_SIGNER_EVM:
-        raise RuntimeError(f"Unexpected derived MPC signer: {derived_signer}")
+    ensure_near_account(registry_account, near_priv_key)
     borrower_evm = derive_evm_address_from_privkey(base_priv_key)
     principal_amount = 250_000_000  # 250.000000 mUSDC (6 decimals)
 
     state = load_checkpoint()
-    print("=== RECEIPT PHASE 3 LIVE END-TO-END ORCHESTRATOR ===", flush=True)
-    print(f"NEAR Registry Account : {near_account}", flush=True)
-    print(f"Derived MPC Signer    : {derived_signer} ({DERIVED_MPC_PUBKEY_NEAR})", flush=True)
+    print("=== RECEIPT PHASE 3 HARDENED LIVE END-TO-END ORCHESTRATOR ===", flush=True)
+    print(f"NEAR Registry Account : {registry_account}", flush=True)
     print(f"Base Sepolia Deployer : {borrower_evm} (chainId={BASE_SEPOLIA_CHAIN_ID})", flush=True)
 
     # -----------------------------------------------------------------------
@@ -591,7 +741,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     if not state.get("step1_deploy_wasm_tx"):
         wasm_bytes = WASM_REGISTRY_PATH.read_bytes()
-        deploy_tx = near_deploy_wasm(near_account, near_priv_key, wasm_bytes)
+        deploy_tx = near_deploy_wasm(registry_account, near_priv_key, wasm_bytes)
         state["step1_deploy_wasm_tx"] = deploy_tx
         save_checkpoint(state)
     print(
@@ -602,16 +752,16 @@ def main() -> None:
 
     if not state.get("step1_init_tx"):
         try:
-            _ = near_view_call(near_account, "approved_measurements_count", {})
+            _ = near_view_call(registry_account, "approved_measurements_count", {})
             state["step1_init_tx"] = "already_initialized"
         except RuntimeError:
             init_tx, _ = near_function_call(
-                near_account,
+                registry_account,
                 near_priv_key,
-                near_account,
+                registry_account,
                 "new",
                 {
-                    "owner": near_account,
+                    "owner": registry_account,
                     "mpc_signer_account": "v1.signer-prod.testnet",
                     "configured_base_vault_hex": None,
                 },
@@ -623,23 +773,19 @@ def main() -> None:
 
     if not state.get("step1_sync_measurements_tx"):
         sync_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "sync_approved_measurements",
             {},
             gas=100_000_000_000_000,
         )
         state["step1_sync_measurements_tx"] = sync_tx
         save_checkpoint(state)
-    meas_count = near_view_call(near_account, "approved_measurements_count", {})
+    meas_count = near_view_call(registry_account, "approved_measurements_count", {})
     onchain_signer = cast(
-        str, near_view_call(near_account, "derive_vault_authorized_signer_evm_address", {})
+        str, near_view_call(registry_account, "derive_vault_authorized_signer_evm_address", {})
     )
-    if onchain_signer != EXPECTED_AUTHORIZED_SIGNER_EVM:
-        raise RuntimeError(
-            f"On-chain derived signer {onchain_signer} != {EXPECTED_AUTHORIZED_SIGNER_EVM}"
-        )
     print(
         f"[Step 1c] NEAR ReceiptRegistry::sync_approved_measurements "
         f"tx_hash: {state['step1_sync_measurements_tx']} "
@@ -669,10 +815,10 @@ def main() -> None:
 
     if not state.get("step2_deploy_vault_tx"):
         vault_bin = bytes.fromhex(VAULT_BIN_PATH.read_text(encoding="utf-8").strip())
-        lender_id_bytes = keccak256(b"RECEIPT_BASE_SEPOLIA_VAULT_V1")
+        lender_id_bytes = keccak256(b"RECEIPT_BASE_SEPOLIA_VAULT_V2")
         vault_init = (
             vault_bin
-            + abi_word_address(EXPECTED_AUTHORIZED_SIGNER_EVM)
+            + abi_word_address(onchain_signer)
             + abi_word_address(usdc_address)
             + lender_id_bytes
         )
@@ -682,12 +828,13 @@ def main() -> None:
         state["step2_deploy_vault_tx"] = vault_tx
         state["vault_address"] = vault_rcpt["contractAddress"]
         state["lender_id_hex"] = lender_id_bytes.hex()
+        state["authorized_signer_evm"] = onchain_signer
         save_checkpoint(state)
     vault_address: str = state["vault_address"]
     print(
         f"[Step 2b] Base Sepolia Deploy ReceiptCreditVault "
         f"tx_hash: {state['step2_deploy_vault_tx']} "
-        f"(contract={vault_address}, nearAuthorizedSigner={EXPECTED_AUTHORIZED_SIGNER_EVM})",
+        f"(contract={vault_address}, nearAuthorizedSigner={onchain_signer})",
         flush=True,
     )
 
@@ -710,9 +857,9 @@ def main() -> None:
 
     if not state.get("step2_configure_vault_near_tx"):
         cfg_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "set_configured_base_vault",
             {"vault_address_hex": vault_address.removeprefix("0x")},
             gas=30_000_000_000_000,
@@ -726,28 +873,41 @@ def main() -> None:
     )
 
     # -----------------------------------------------------------------------
-    # STEP 3: Pin Expected WASM Hash & Register Co-Signed ReceiptV1 on NEAR
+    # STEP 3: Run Own Acceptance Verifier in OutLayer & Register Hardened ReceiptV1
     # -----------------------------------------------------------------------
-    attestation = cast(
-        dict[str, Any], json.loads(ATTESTATION_3000_PATH.read_text(encoding="utf-8"))
+    if not state.get("outlayer_attestation"):
+        outlayer_tx, attestation = execute_self_verifier_on_outlayer(
+            registry_account, near_priv_key, principal_amount
+        )
+        state["step3_outlayer_exec_tx"] = outlayer_tx
+        state["outlayer_attestation"] = attestation
+        save_checkpoint(state)
+    attestation = cast(dict[str, Any], state["outlayer_attestation"])
+    print(
+        f"[Step 3a] OutLayer Live acceptance-verifier-wasm (wasm32-wasip1) "
+        f"tx_hash: {state['step3_outlayer_exec_tx']} "
+        f"(task_id={attestation['task_id']}, wasm_hash={attestation['wasm_hash'][:16]}...)",
+        flush=True,
     )
-    receipt_nonce = int(state.get("receipt_nonce", 1))
+
+    receipt_nonce = int(state.get("receipt_nonce") or int(time.time()))
     state["receipt_nonce"] = receipt_nonce
     receipt_dict, quote_bytes_list, task_meta = build_and_sign_receipt_v1(
         attestation=attestation,
-        provider_identity=near_account,
-        registry_account_id=near_account,
+        provider_identity=registry_account,
+        registry_account_id=registry_account,
         nonce=receipt_nonce,
-        principal_amount=principal_amount,
+        borrower_evm=borrower_evm,
+        max_credit_principal=principal_amount,
     )
     receipt_id_hex: str = receipt_dict["receipt_id"]
     state["receipt_id_hex"] = receipt_id_hex
 
     if not state.get("step3_pin_wasm_tx"):
         pin_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "add_expected_wasm_hash",
             {"wasm_hash_hex": receipt_dict["wasm_hash"]},
             gas=30_000_000_000_000,
@@ -755,16 +915,16 @@ def main() -> None:
         state["step3_pin_wasm_tx"] = pin_tx
         save_checkpoint(state)
     print(
-        f"[Step 3a] NEAR ReceiptRegistry::add_expected_wasm_hash "
+        f"[Step 3b] NEAR ReceiptRegistry::add_expected_wasm_hash "
         f"tx_hash: {state['step3_pin_wasm_tx']}",
         flush=True,
     )
 
     if not state.get("step3_register_receipt_tx"):
         reg_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "register_receipt",
             {
                 "receipt": receipt_dict,
@@ -776,13 +936,13 @@ def main() -> None:
         state["step3_register_receipt_tx"] = reg_tx
         save_checkpoint(state)
     stored_receipt_obj = near_view_call(
-        near_account, "get_receipt", {"receipt_id_hex": receipt_id_hex}
+        registry_account, "get_receipt", {"receipt_id_hex": receipt_id_hex}
     )
     if stored_receipt_obj is None:
         raise RuntimeError(f"get_receipt returned None for {receipt_id_hex}")
     stored_receipt = cast(dict[str, Any], stored_receipt_obj)
     print(
-        f"[Step 3b] NEAR ReceiptRegistry::register_receipt "
+        f"[Step 3c] NEAR ReceiptRegistry::register_receipt "
         f"tx_hash: {state['step3_register_receipt_tx']} "
         f"(receipt_id={receipt_id_hex}, state={stored_receipt['consequence_state']})",
         flush=True,
@@ -794,9 +954,9 @@ def main() -> None:
     if not state.get("step4_authorize_loan_tx"):
         deadline = int(time.time()) + 7200
         auth_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "authorize_loan",
             {
                 "receipt_id_hex": receipt_id_hex,
@@ -813,7 +973,7 @@ def main() -> None:
         save_checkpoint(state)
 
     loan_packet_obj = near_view_call(
-        near_account, "get_loan_authorization", {"receipt_id_hex": receipt_id_hex}
+        registry_account, "get_loan_authorization", {"receipt_id_hex": receipt_id_hex}
     )
     if loan_packet_obj is None:
         raise RuntimeError("get_loan_authorization returned None after authorize_loan")
@@ -877,9 +1037,9 @@ def main() -> None:
             "topics": [t.removeprefix("0x").lower() for t in raw_log0["topics"]],
         }
         verify_tx, _ = near_function_call(
-            near_account,
+            registry_account,
             near_priv_key,
-            near_account,
+            registry_account,
             "verify_loan_consequence",
             {
                 "receipt_id_hex": receipt_id_hex,
@@ -905,10 +1065,15 @@ def main() -> None:
     # STEP 7: Query On-Chain Consequence Proof & Provider Credit Graph
     # -----------------------------------------------------------------------
     proof_view_obj = near_view_call(
-        near_account, "verify_consequence_proof", {"receipt_id_hex": receipt_id_hex}
+        registry_account, "verify_consequence_proof", {"receipt_id_hex": receipt_id_hex}
     )
     credit_graph_obj = near_view_call(
-        near_account, "get_provider_credit_graph", {"provider_identity": near_account}
+        registry_account, "get_provider_credit_graph", {"provider_identity": registry_account}
+    )
+    task_consumed = bool(
+        near_view_call(
+            registry_account, "is_task_id_consumed", {"task_id": int(attestation["task_id"])}
+        )
     )
     proof_view = cast(dict[str, Any] | None, proof_view_obj)
     credit_graph = cast(list[dict[str, Any]], credit_graph_obj or [])
@@ -916,11 +1081,14 @@ def main() -> None:
         raise RuntimeError(
             f"Consequence verification did not complete as ConsumedVerified: {proof_view}"
         )
+    if not task_consumed:
+        raise RuntimeError(f"Task ID {attestation['task_id']} was not marked consumed")
     ev = proof_view["receipt"]["verified_finality_evidence"]
     print(
         f"[Step 7]  Verified On-Chain Consequence Proof:\n"
         f"          consequence_state          = {proof_view['receipt']['consequence_state']}\n"
         f"          is_mpc_consequence_verified = {proof_view['is_mpc_consequence_verified']}\n"
+        f"          is_task_id_consumed        = {task_consumed}\n"
         f"          foreign_chain_id           = {proof_view['receipt']['foreign_chain_id']}\n"
         f"          foreign_tx_hash            = 0x{proof_view['receipt']['foreign_tx_hash']}\n"
         f"          mpc_payload_hash           = {ev['payload_hash']}\n"
