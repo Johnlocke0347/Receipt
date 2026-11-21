@@ -265,7 +265,7 @@ fn end_to_end_near_registry_to_base_sepolia_evm_vault_and_back() {
     let task_meta = record.to_v1_task_inputs().unwrap();
     let wasm_hash = task_meta.wasm_hash.unwrap();
     let input_hash = task_meta.input_hash.unwrap();
-    let output_hash = task_meta.output_hash;
+    let output_hash = hashing::enclave_output_hash(WorkOutcome::Pass, &task_meta.output_hash);
     registry.add_expected_wasm_hash(hex::encode(wasm_hash));
 
     let buyer_sk = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);

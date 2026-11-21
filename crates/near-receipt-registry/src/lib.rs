@@ -582,8 +582,14 @@ impl ReceiptRegistry {
         if outlayer_task_meta.input_hash != Some(receipt.input_hash) {
             rt::panic_str("outlayer_task_meta.input_hash does not match receipt.input_hash");
         }
-        if outlayer_task_meta.output_hash != receipt.output_hash {
-            rt::panic_str("outlayer_task_meta.output_hash does not match receipt.output_hash");
+        let expected_output_hash = receipt_core::hashing::enclave_output_hash(
+            receipt.outcome,
+            &outlayer_task_meta.output_hash,
+        );
+        if receipt.output_hash != expected_output_hash {
+            rt::panic_str(
+                "receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash",
+            );
         }
 
         let quote = TdxQuote::parse(&tdx_quote_bytes)
@@ -1376,7 +1382,7 @@ mod tests {
 
         let wasm_hash = task_meta.wasm_hash.unwrap();
         let input_hash = task_meta.input_hash.unwrap();
-        let output_hash = task_meta.output_hash;
+        let output_hash = hashing::enclave_output_hash(WorkOutcome::Pass, &task_meta.output_hash);
         contract.add_expected_wasm_hash(hex::encode(wasm_hash));
 
         // Build and co-sign ReceiptV1 bound to genuine OutLayer quote 1500
@@ -2058,5 +2064,51 @@ mod tests {
 
         f.contract
             .register_receipt(replayed, f.quote_bytes, f.task_meta);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash"
+    )]
+    fn fail_committed_enclave_output_hash_rejected_when_claiming_pass() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+
+        let buyer_sk = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+
+        let fail_output_hash =
+            hashing::enclave_output_hash(WorkOutcome::Fail, &f.task_meta.output_hash);
+        let evidence = hashing::evidence_commitment(
+            &f.receipt.wasm_hash,
+            &f.receipt.input_hash,
+            &fail_output_hash,
+            &f.receipt.confidential_settlement_commitment,
+        );
+        f.receipt.output_hash = fail_output_hash;
+        f.receipt.evidence_commitment = evidence;
+        f.receipt.receipt_id =
+            hashing::receipt_id(&f.receipt.provider_identity, f.receipt.nonce, &evidence);
+        f.receipt.outcome = WorkOutcome::Pass;
+        let payload = f.receipt.signing_payload();
+        f.receipt.buyer_signature = sign_payload(
+            Party::Buyer,
+            &buyer_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        f.receipt.provider_signature = sign_payload(
+            Party::Provider,
+            &provider_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+
+        f.contract
+            .register_receipt(f.receipt, f.quote_bytes, f.task_meta);
     }
 }
