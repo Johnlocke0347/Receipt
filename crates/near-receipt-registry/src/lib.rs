@@ -427,6 +427,8 @@ pub struct ReceiptRegistry {
     pub approved_measurements: BTreeMap<[u8; 32], Measurements>,
     /// Replay protection set over `(provider_pubkey, nonce)`.
     pub used_nonces: BTreeSet<([u8; 32], u64)>,
+    /// Replay protection set over consumed OutLayer TDX attestation `task_id`s.
+    pub consumed_task_ids: BTreeSet<u64>,
     /// Registered receipts keyed by `receipt_id`.
     pub receipts: BTreeMap<[u8; 32], ReceiptV1>,
     /// In-flight loan authorization requests awaiting `v1.signer-prod.testnet::sign`.
@@ -561,6 +563,12 @@ impl ReceiptRegistry {
         if self.receipts.contains_key(&receipt.receipt_id) {
             rt::panic_str("receipt_id already registered");
         }
+        if self.consumed_task_ids.contains(&outlayer_task_meta.task_id) {
+            rt::panic_str(&format!(
+                "outlayer task_id {} already consumed by a registered receipt",
+                outlayer_task_meta.task_id
+            ));
+        }
 
         let registry_account = rt::current_account_id();
         verify_receipt_signatures(&receipt, &self.near_chain_id, registry_account.as_str())
@@ -603,6 +611,7 @@ impl ReceiptRegistry {
             .unwrap_or_else(|e| rt::panic_str(&format!("TDX report_data task_hash mismatch: {e}")));
 
         self.used_nonces.insert(nonce_key);
+        self.consumed_task_ids.insert(outlayer_task_meta.task_id);
         receipt.consequence_state = ConsequenceState::RegisteredVerified;
         receipt.foreign_chain_id = None;
         receipt.foreign_tx_hash = None;
@@ -709,6 +718,12 @@ impl ReceiptRegistry {
     pub fn is_measurement_approved(&self, measurement_digest_hex: String) -> bool {
         let digest = decode_hex_array::<32>(&measurement_digest_hex, "measurement_digest_hex");
         self.approved_measurements.contains_key(&digest)
+    }
+
+    /// Check whether an OutLayer TDX attestation `task_id` has already been consumed.
+    #[must_use]
+    pub fn is_task_id_consumed(&self, task_id: u64) -> bool {
+        self.consumed_task_ids.contains(&task_id)
     }
 
     fn assert_owner(&self) {
@@ -905,6 +920,7 @@ impl ReceiptRegistry {
             expected_wasm_hashes: BTreeSet::new(),
             approved_measurements: BTreeMap::new(),
             used_nonces: BTreeSet::new(),
+            consumed_task_ids: BTreeSet::new(),
             receipts: BTreeMap::new(),
             pending_loan_requests: BTreeMap::new(),
             loan_authorizations: BTreeMap::new(),
@@ -1999,5 +2015,48 @@ mod tests {
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "outlayer task_id 1500 already consumed by a registered receipt")]
+    fn replayed_quote_task_id_with_fresh_nonce_rejected() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        assert!(f.contract.is_task_id_consumed(f.task_meta.task_id));
+
+        let buyer_sk = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+        let mut replayed = f.receipt;
+        replayed.nonce = 2;
+        replayed.receipt_id = hashing::receipt_id(
+            &replayed.provider_identity,
+            replayed.nonce,
+            &replayed.evidence_commitment,
+        );
+        let payload = replayed.signing_payload();
+        replayed.buyer_signature = sign_payload(
+            Party::Buyer,
+            &buyer_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        replayed.provider_signature = sign_payload(
+            Party::Provider,
+            &provider_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+
+        f.contract
+            .register_receipt(replayed, f.quote_bytes, f.task_meta);
     }
 }
