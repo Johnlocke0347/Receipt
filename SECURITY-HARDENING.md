@@ -1,8 +1,8 @@
 # Security Hardening Report (`hardening-post-submission`)
 
-The original hackathon submission is preserved unmodified on [`main`](https://github.com/Johnlocke0347/Receipt/tree/main) at commit `b55fedf1929d3ced523b9fa51f33119216834625` and tag [`submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) at code baseline commit `92deb5d69c8fca1f5aa1b0a38833f0223ca96ef7`.
+The original hackathon submission is preserved unmodified on [`main`](https://github.com/Johnlocke0347/Receipt/tree/main) and tag [`submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) at commit `b55fedf1929d3ced523b9fa51f33119216834625` (the tag was corrected from `92deb5d69c8fca1f5aa1b0a38833f0223ca96ef7`).
 
-This document records the four post-submission security vulnerabilities identified in `submitted-v1`, their exact fixes on branch `hardening-post-submission`, the committing SHA-1 hashes, and the regression tests proving each fix.
+This document records the four post-submission security vulnerabilities identified in `submitted-v1`, their exact fixes on branch `hardening-post-submission`, the committing SHA-1 hashes, and the negative regression tests (including failing runs with each fix temporarily omitted and passing runs with the fix restored).
 
 ---
 
@@ -15,7 +15,7 @@ This document records the four post-submission security vulnerabilities identifi
 | 3 | Reusable OutLayer TDX quote `task_id` across incrementing `nonce` values | Added `consumed_task_ids: BTreeSet<u64>` replay guard + `is_task_id_consumed` view in `ReceiptRegistry` | [`04322dd8f31bf2655a92af1c15cc29f01401c4c2`](https://github.com/Johnlocke0347/Receipt/commit/04322dd8f31bf2655a92af1c15cc29f01401c4c2) | `tests::replayed_quote_task_id_with_fresh_nonce_rejected` |
 | 4 | Outcome (`Pass`/`Fail`) not cryptographically committed into `receipt.output_hash` | Added `hashing::enclave_output_hash(outcome, raw_enclave_output_hash)` (`RECEIPT_OUTCOME_OUTPUT_V1`) and enforced it in `register_receipt` | [`e3e6535b695c024a66a576fff204c6cb3013f9d2`](https://github.com/Johnlocke0347/Receipt/commit/e3e6535b695c024a66a576fff204c6cb3013f9d2) | `hashing::tests::outcome_changes_enclave_output_hash`, `tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass` |
 
-*(Apache-2.0 `LICENSE` added prior to hardening fixes in [`c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2`](https://github.com/Johnlocke0347/Receipt/commit/c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2).)*
+*(Apache-2.0 `LICENSE` added prior to hardening fixes in [`c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2`](https://github.com/Johnlocke0347/Receipt/commit/c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2); `Cargo.toml`, `pyproject.toml`, and Solidity SPDX headers aligned to `Apache-2.0` in [`4df2e5b`](https://github.com/Johnlocke0347/Receipt/commit/4df2e5b).)*
 
 ---
 
@@ -31,6 +31,56 @@ This document records the four post-submission security vulnerabilities identifi
   - `receipt_core::signing::tests::tampered_borrower_or_credit_limit_rejected_by_signature`
   - `near_receipt_registry::tests::authorize_loan_rejects_mismatched_borrower_address`
   - `near_receipt_registry::tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit`
+- **Observed Failing Run Without Fix (`authorize_loan_internal` borrower/limit guards removed):**
+  ```text
+  running 1 test
+  test tests::authorize_loan_rejects_mismatched_borrower_address - should panic ... FAILED
+
+  failures:
+
+  ---- tests::authorize_loan_rejects_mismatched_borrower_address stdout ----
+  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:1969:8
+
+  failures:
+      tests::authorize_loan_rejects_mismatched_borrower_address
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.08s
+  ```
+  ```text
+  running 1 test
+  test tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit - should panic ... FAILED
+
+  failures:
+
+  ---- tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit stdout ----
+  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:1989:8
+
+  failures:
+      tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.08s
+  ```
+- **Observed Passing Run With Fix Restored:**
+  ```text
+  running 1 test
+
+  thread 'tests::authorize_loan_rejects_mismatched_borrower_address' (3992) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  borrower_evm_address does not match co-signed receipt.borrower_evm_address
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tests::authorize_loan_rejects_mismatched_borrower_address - should panic ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.07s
+  ```
+  ```text
+  running 1 test
+
+  thread 'tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit' (18756) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  principal_amount exceeds co-signed receipt.max_credit_principal
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit - should panic ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.07s
+  ```
 
 ### 2. Missing Provider Authorization on `authorize_loan`
 - **Hole in `submitted-v1`:** `ReceiptRegistry::authorize_loan_internal` did not inspect `rt::predecessor_account_id()`. Any third-party account on NEAR could call `authorize_loan` on a `RegisteredVerified` receipt, locking `consequence_state` to `LoanAuthorized` (griefing / front-running loan terms such as `deadline`).
@@ -53,6 +103,17 @@ This document records the four post-submission security vulnerabilities identifi
 
   test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.09s
   ```
+- **Observed Passing Run With Fix:**
+  ```text
+  running 1 test
+
+  thread 'tests::authorize_loan_rejects_non_provider_caller' (11600) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  only receipt.provider_identity may call authorize_loan
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tests::authorize_loan_rejects_non_provider_caller - should panic ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.09s
+  ```
 
 ### 3. Quote `task_id` Replay Across Fresh Nonces
 - **Hole in `submitted-v1`:** `ReceiptRegistry::register_receipt` enforced `(provider_pubkey, nonce)` uniqueness, but did not track consumed OutLayer `task_id` values. Re-signing new receipts with `nonce = 2, 3, ...` allowed a single genuine OutLayer TDX quote (`task_id`) to register multiple independent receipts.
@@ -60,6 +121,32 @@ This document records the four post-submission security vulnerabilities identifi
   - Added `pub consumed_task_ids: BTreeSet<u64>` to `ReceiptRegistry` state (`crates/near-receipt-registry/src/lib.rs`).
   - Rejected duplicate `outlayer_task_meta.task_id` before registration and inserted `task_id` upon successful registration, exposed via `is_task_id_consumed(task_id)`.
 - **Proving Test:** `near_receipt_registry::tests::replayed_quote_task_id_with_fresh_nonce_rejected`
+- **Observed Failing Run Without Fix (`consumed_task_ids` check removed):**
+  ```text
+  running 1 test
+  test tests::replayed_quote_task_id_with_fresh_nonce_rejected - should panic ... FAILED
+
+  failures:
+
+  ---- tests::replayed_quote_task_id_with_fresh_nonce_rejected stdout ----
+  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:2029:8
+
+  failures:
+      tests::replayed_quote_task_id_with_fresh_nonce_rejected
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.13s
+  ```
+- **Observed Passing Run With Fix Restored:**
+  ```text
+  running 1 test
+
+  thread 'tests::replayed_quote_task_id_with_fresh_nonce_rejected' (10468) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  outlayer task_id 1500 already consumed by a registered receipt
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tests::replayed_quote_task_id_with_fresh_nonce_rejected - should panic ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.10s
+  ```
 
 ### 4. Uncommitted Enclave Outcome in `output_hash`
 - **Hole in `submitted-v1`:** `ReceiptRegistry::register_receipt` required `receipt.outcome == WorkOutcome::Pass` and `receipt.output_hash == outlayer_task_meta.output_hash`, but did not domain-commit the `WorkOutcome` into `receipt.output_hash`. Colluding parties could wrap a `Fail`-derived output hash into a `Pass` receipt.
@@ -69,6 +156,32 @@ This document records the four post-submission security vulnerabilities identifi
 - **Proving Tests:**
   - `receipt_core::hashing::tests::outcome_changes_enclave_output_hash`
   - `near_receipt_registry::tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass`
+- **Observed Failing Run Without Fix (`expected_output_hash` commitment check removed):**
+  ```text
+  running 1 test
+  test tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass - should panic ... FAILED
+
+  failures:
+
+  ---- tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass stdout ----
+  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:2074:8
+
+  failures:
+      tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass
+
+  test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.20s
+  ```
+- **Observed Passing Run With Fix Restored:**
+  ```text
+  running 1 test
+
+  thread 'tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass' (5440) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  test tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass - should panic ... ok
+
+  test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.11s
+  ```
 
 ---
 
