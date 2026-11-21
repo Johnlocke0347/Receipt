@@ -1,6 +1,6 @@
 # Security Hardening Report (`hardening-post-submission`)
 
-The original hackathon submission is preserved unmodified on branch [`main` / tag `submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) at commit `92deb5d69c8fca1f5aa1b0a38833f0223ca96ef7`.
+The original hackathon submission is preserved unmodified on [`main`](https://github.com/Johnlocke0347/Receipt/tree/main) at commit `b55fedf1929d3ced523b9fa51f33119216834625` and tag [`submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) at code baseline commit `92deb5d69c8fca1f5aa1b0a38833f0223ca96ef7`.
 
 This document records the four post-submission security vulnerabilities identified in `submitted-v1`, their exact fixes on branch `hardening-post-submission`, the committing SHA-1 hashes, and the regression tests proving each fix.
 
