@@ -959,6 +959,9 @@ impl ReceiptRegistry {
         let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
             rt::panic_str("receipt not found");
         };
+        if rt::predecessor_account_id().as_str() != receipt.provider_identity {
+            rt::panic_str("only receipt.provider_identity may call authorize_loan");
+        }
         if receipt.outcome != WorkOutcome::Pass {
             rt::panic_str("only PASS receipts can authorize loans");
         }
@@ -1973,6 +1976,26 @@ mod tests {
             id_hex,
             "2222222222222222222222222222222222222222".to_string(),
             U128(250_000_001),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only receipt.provider_identity may call authorize_loan")]
+    fn authorize_loan_rejects_non_provider_caller() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("attacker.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "2222222222222222222222222222222222222222".to_string(),
+            U128(100_000_000),
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
