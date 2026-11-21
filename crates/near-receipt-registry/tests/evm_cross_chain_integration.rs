@@ -302,6 +302,8 @@ fn end_to_end_near_registry_to_base_sepolia_evm_vault_and_back() {
         nonce: 1,
         created_at: 1_771_587_262,
         confidential_settlement_commitment: settlement_commitment,
+        borrower_evm_address: borrower_bytes,
+        max_credit_principal: 250_000_000,
         consequence_state: ConsequenceState::RegisteredVerified,
         foreign_chain_id: None,
         foreign_tx_hash: None,

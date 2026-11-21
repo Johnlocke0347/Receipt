@@ -98,6 +98,11 @@ pub struct ReceiptSigningPayloadV1 {
     /// Settlement commitment.
     #[serde(with = "hexser")]
     pub confidential_settlement_commitment: [u8; 32],
+    /// Authorized borrower EVM address on the destination chain (`20` bytes).
+    #[serde(with = "hexser")]
+    pub borrower_evm_address: [u8; 20],
+    /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
+    pub max_credit_principal: u128,
 }
 
 /// The canonical receipt registered on the NEAR `ReceiptRegistry`.
@@ -148,6 +153,11 @@ pub struct ReceiptV1 {
     /// Commitment to the Confidential Intents settlement.
     #[serde(with = "hexser")]
     pub confidential_settlement_commitment: [u8; 32],
+    /// Authorized borrower EVM address on the destination chain (`20` bytes).
+    #[serde(with = "hexser")]
+    pub borrower_evm_address: [u8; 20],
+    /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
+    pub max_credit_principal: u128,
     /// Lifecycle state.
     pub consequence_state: ConsequenceState,
     /// Foreign chain identifier (e.g. `eip155:84532`).
@@ -181,10 +191,12 @@ impl ReceiptV1 {
             nonce: self.nonce,
             created_at: self.created_at,
             confidential_settlement_commitment: self.confidential_settlement_commitment,
+            borrower_evm_address: self.borrower_evm_address,
+            max_credit_principal: self.max_credit_principal,
         }
     }
 
-    /// Check schema version, PASS outcome, and the derived `evidence_commitment` / `receipt_id`.
+    /// Check schema version, PASS outcome, non-zero credit terms, and derived `evidence_commitment` / `receipt_id`.
     ///
     /// # Errors
     /// Returns the first violated invariant.
@@ -194,6 +206,11 @@ impl ReceiptV1 {
         }
         if self.outcome != WorkOutcome::Pass {
             return Err(ReceiptError::OutcomeNotPass);
+        }
+        if self.borrower_evm_address == [0u8; 20] || self.max_credit_principal == 0 {
+            return Err(ReceiptError::InvalidInput(
+                "borrower_evm_address and max_credit_principal must be non-zero".into(),
+            ));
         }
         let evidence = hashing::evidence_commitment(
             &self.wasm_hash,

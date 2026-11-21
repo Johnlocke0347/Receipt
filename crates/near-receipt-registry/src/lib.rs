@@ -965,6 +965,14 @@ impl ReceiptRegistry {
         if receipt.consequence_state != ConsequenceState::RegisteredVerified {
             rt::panic_str("receipt is not in RegisteredVerified state");
         }
+        if borrower != receipt.borrower_evm_address {
+            rt::panic_str(
+                "borrower_evm_address does not match co-signed receipt.borrower_evm_address",
+            );
+        }
+        if principal > receipt.max_credit_principal {
+            rt::panic_str("principal_amount exceeds co-signed receipt.max_credit_principal");
+        }
 
         let eip712_digest = eip712_loan_authorization_digest(
             &receipt_id,
@@ -1389,6 +1397,8 @@ mod tests {
             nonce,
             created_at: 1_771_587_262,
             confidential_settlement_commitment: settlement_commitment,
+            borrower_evm_address: [0x22u8; 20],
+            max_credit_principal: 250_000_000,
             consequence_state: ConsequenceState::RegisteredVerified,
             foreign_chain_id: None,
             foreign_tx_hash: None,
@@ -1923,6 +1933,48 @@ mod tests {
             hex::encode(base_block_hash),
             forged_log,
             EvmFinality::Finalized,
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "borrower_evm_address does not match co-signed receipt.borrower_evm_address"
+    )]
+    fn authorize_loan_rejects_mismatched_borrower_address() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "3333333333333333333333333333333333333333".to_string(),
+            U128(100_000_000),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "principal_amount exceeds co-signed receipt.max_credit_principal")]
+    fn authorize_loan_rejects_principal_exceeding_receipt_credit_limit() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "2222222222222222222222222222222222222222".to_string(),
+            U128(250_000_001),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
         );
     }
 }
