@@ -9,8 +9,9 @@ RECEIPT is a cross-chain reputation and credit primitive for autonomous agents. 
 ---
 
 ## Quick Demo & Verification (2 Minutes)
+> **Note:** The steps below verify the original submission (`submitted-v1`, `receipt-registry.testnet`). The hardened live loop is in the section headed "2. `hardening-post-submission` Live Loop" further down.
 
-*   **Demo Video:** `(https://youtu.be/x2wtwXqngII)`
+*   **Demo Video:** [Watch the demo](https://youtu.be/x2wtwXqngII)
 *   **Expected Outcome:** In a single verifiable loop, a TDX-attested `ReceiptV1` registered on `receipt-registry.testnet` unlocks a `250 mUSDC` credit draw on Base Sepolia (`0xf59f9d...95e8`) and is cryptographically verified back on NEAR by `v1.signer-prod.testnet` (`consequence_state = "ConsumedVerified"`, `is_mpc_consequence_verified = true`).
 
 ### Verify the Live On-Chain State in 4 Steps ("Do X → See Y")
