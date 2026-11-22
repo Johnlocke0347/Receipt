@@ -15,7 +15,7 @@ This document records the four post-submission security vulnerabilities identifi
 | 3 | Reusable OutLayer TDX quote `task_id` across incrementing `nonce` values | Added `consumed_task_ids: BTreeSet<u64>` replay guard + `is_task_id_consumed` view in `ReceiptRegistry` | [`04322dd8f31bf2655a92af1c15cc29f01401c4c2`](https://github.com/Johnlocke0347/Receipt/commit/04322dd8f31bf2655a92af1c15cc29f01401c4c2) | `tests::replayed_quote_task_id_with_fresh_nonce_rejected` |
 | 4 | Outcome (`Pass`/`Fail`) not cryptographically committed into `receipt.output_hash` | Added `hashing::enclave_output_hash(outcome, raw_enclave_output_hash)` (`RECEIPT_OUTCOME_OUTPUT_V1`) and enforced it in `register_receipt` | [`e3e6535b695c024a66a576fff204c6cb3013f9d2`](https://github.com/Johnlocke0347/Receipt/commit/e3e6535b695c024a66a576fff204c6cb3013f9d2) | `hashing::tests::outcome_changes_enclave_output_hash`, `tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass` |
 
-*(Apache-2.0 `LICENSE` added prior to hardening fixes in [`c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2`](https://github.com/Johnlocke0347/Receipt/commit/c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2); `Cargo.toml`, `pyproject.toml`, and Solidity SPDX headers aligned to `Apache-2.0` in [`4df2e5b`](https://github.com/Johnlocke0347/Receipt/commit/4df2e5b).)*
+*(Apache-2.0 `LICENSE` added prior to hardening fixes in [`c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2`](https://github.com/Johnlocke0347/Receipt/commit/c8d3e9ac7dcad2df1f6342a03d3eee6808748ff2); `Cargo.toml`, `pyproject.toml`, and Solidity SPDX headers aligned to `Apache-2.0` in [`4df2e5be9b834c8d63287468dbda8d6c2b166638`](https://github.com/Johnlocke0347/Receipt/commit/4df2e5be9b834c8d63287468dbda8d6c2b166638).)*
 
 ---
 
@@ -39,7 +39,7 @@ This document records the four post-submission security vulnerabilities identifi
   failures:
 
   ---- tests::authorize_loan_rejects_mismatched_borrower_address stdout ----
-  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:1969:8
+  note: test did not panic as expected at crates/near-receipt-registry/src/lib.rs:1969:8
 
   failures:
       tests::authorize_loan_rejects_mismatched_borrower_address
@@ -53,7 +53,7 @@ This document records the four post-submission security vulnerabilities identifi
   failures:
 
   ---- tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit stdout ----
-  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:1989:8
+  note: test did not panic as expected at crates/near-receipt-registry/src/lib.rs:1989:8
 
   failures:
       tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit
@@ -64,7 +64,7 @@ This document records the four post-submission security vulnerabilities identifi
   ```text
   running 1 test
 
-  thread 'tests::authorize_loan_rejects_mismatched_borrower_address' (3992) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  thread 'tests::authorize_loan_rejects_mismatched_borrower_address' (3992) panicked at crates/near-receipt-registry/src/lib.rs:270:9:
   borrower_evm_address does not match co-signed receipt.borrower_evm_address
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
   test tests::authorize_loan_rejects_mismatched_borrower_address - should panic ... ok
@@ -74,7 +74,7 @@ This document records the four post-submission security vulnerabilities identifi
   ```text
   running 1 test
 
-  thread 'tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit' (18756) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  thread 'tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit' (18756) panicked at crates/near-receipt-registry/src/lib.rs:270:9:
   principal_amount exceeds co-signed receipt.max_credit_principal
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
   test tests::authorize_loan_rejects_principal_exceeding_receipt_credit_limit - should panic ... ok
@@ -96,7 +96,7 @@ This document records the four post-submission security vulnerabilities identifi
   failures:
 
   ---- tests::authorize_loan_rejects_non_provider_caller stdout ----
-  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:1983:8
+  note: test did not panic as expected at crates/near-receipt-registry/src/lib.rs:1983:8
 
   failures:
       tests::authorize_loan_rejects_non_provider_caller
@@ -107,7 +107,7 @@ This document records the four post-submission security vulnerabilities identifi
   ```text
   running 1 test
 
-  thread 'tests::authorize_loan_rejects_non_provider_caller' (11600) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  thread 'tests::authorize_loan_rejects_non_provider_caller' (11600) panicked at crates/near-receipt-registry/src/lib.rs:270:9:
   only receipt.provider_identity may call authorize_loan
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
   test tests::authorize_loan_rejects_non_provider_caller - should panic ... ok
@@ -129,7 +129,7 @@ This document records the four post-submission security vulnerabilities identifi
   failures:
 
   ---- tests::replayed_quote_task_id_with_fresh_nonce_rejected stdout ----
-  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:2029:8
+  note: test did not panic as expected at crates/near-receipt-registry/src/lib.rs:2029:8
 
   failures:
       tests::replayed_quote_task_id_with_fresh_nonce_rejected
@@ -140,7 +140,7 @@ This document records the four post-submission security vulnerabilities identifi
   ```text
   running 1 test
 
-  thread 'tests::replayed_quote_task_id_with_fresh_nonce_rejected' (10468) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  thread 'tests::replayed_quote_task_id_with_fresh_nonce_rejected' (10468) panicked at crates/near-receipt-registry/src/lib.rs:270:9:
   outlayer task_id 1500 already consumed by a registered receipt
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
   test tests::replayed_quote_task_id_with_fresh_nonce_rejected - should panic ... ok
@@ -164,7 +164,7 @@ This document records the four post-submission security vulnerabilities identifi
   failures:
 
   ---- tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass stdout ----
-  note: test did not panic as expected at crates\near-receipt-registry\src\lib.rs:2074:8
+  note: test did not panic as expected at crates/near-receipt-registry/src/lib.rs:2074:8
 
   failures:
       tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass
@@ -175,7 +175,7 @@ This document records the four post-submission security vulnerabilities identifi
   ```text
   running 1 test
 
-  thread 'tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass' (5440) panicked at crates\near-receipt-registry\src\lib.rs:270:9:
+  thread 'tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass' (5440) panicked at crates/near-receipt-registry/src/lib.rs:270:9:
   receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash
   note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
   test tests::fail_committed_enclave_output_hash_rejected_when_claiming_pass - should panic ... ok

@@ -166,7 +166,7 @@ pub struct ReceiptV1 {
 We will structure the repository cleanly so Rust workspaces, WASM builds, Solidity contracts, and Python CLI/orchestration tools work seamlessly together:
 
 ```text
-d:\NEAR AI HACKATHON\
+Receipt/
 ├── Cargo.toml                          # Rust workspace root
 ├── pyproject.toml                      # uv-managed Python 3.12+ project (CLI, E2E runner, Solidity compiler/deployer)
 ├── docs/

@@ -216,12 +216,12 @@ The original hackathon submission is preserved unmodified on `main` / annotated 
 
 | Path | Description |
 | :--- | :--- |
-| `crates/receipt-core` | Core cryptographic primitives: `ReceiptV1`, domain-separated Ed25519 co-signing, Intel TDX Quote v4 parser + `dcap-qvl` full DCAP collateral verifier, EIP-712 `LoanAuthorization` & `LoanDrawn` verifier, additive MPC KDF, and Borsh `ForeignTxSignPayload::V1`. |
-| `crates/acceptance-verifier-wasm` | Deterministic acceptance verifier compiled to `wasm32-wasip1` (executed live via FastFS on `worker.outlayer.testnet` and under `wasmtime`) and `wasm32-wasip2` (verified locally under `wasmtime`; live OutLayer worker instantiation currently fails). |
-| `crates/near-receipt-registry` | NEAR smart contract (`near-sdk` v5) managing approved OutLayer measurements, receipt registration, Chain Signatures loan authorization (`domain_id: 0`), and MPC foreign-tx verification (`domain_id: 3`). Includes `revm` cross-stack EVM integration test. |
-| `contracts/base-sepolia` | `ReceiptCreditVault.sol` (EIP-712 signature verification, replay protection, CEI `LoanDrawn` emission) and `MockCreditUSDC.sol`. |
-| `src/receipt_orchestrator` | Live testnet probe (`probe.py`) and resumable end-to-end orchestrator (`demo_e2e.py`). |
-| `docs/PLAN.md` & `docs/PROGRESS.md` | Full architectural specification, protocol discoveries, and complete verification report. |
+| [`crates/receipt-core`](./crates/receipt-core) | Core cryptographic primitives: `ReceiptV1`, domain-separated Ed25519 co-signing, Intel TDX Quote v4 parser + `dcap-qvl` full DCAP collateral verifier, EIP-712 `LoanAuthorization` & `LoanDrawn` verifier, additive MPC KDF, and Borsh `ForeignTxSignPayload::V1`. |
+| [`crates/acceptance-verifier-wasm`](./crates/acceptance-verifier-wasm) | Deterministic acceptance verifier compiled to `wasm32-wasip1` (executed live via FastFS on `worker.outlayer.testnet` and under `wasmtime`) and `wasm32-wasip2` (verified locally under `wasmtime`; live OutLayer worker instantiation currently fails). |
+| [`crates/near-receipt-registry`](./crates/near-receipt-registry) | NEAR smart contract (`near-sdk` v5) managing approved OutLayer measurements, receipt registration, Chain Signatures loan authorization (`domain_id: 0`), and MPC foreign-tx verification (`domain_id: 3`). Includes `revm` cross-stack EVM integration test. |
+| [`contracts/base-sepolia`](./contracts/base-sepolia) | `ReceiptCreditVault.sol` (EIP-712 signature verification, replay protection, CEI `LoanDrawn` emission) and `MockCreditUSDC.sol`. |
+| [`src/receipt_orchestrator`](./src/receipt_orchestrator) | Live testnet probe (`probe.py`) and resumable end-to-end orchestrator (`demo_e2e.py`). |
+| [`docs/PLAN.md`](./docs/PLAN.md) & [`docs/PROGRESS.md`](./docs/PROGRESS.md) | Full architectural specification, protocol discoveries, and complete verification report. |
 
 ### Run All Unit & Cross-Stack Integration Tests (No Credentials Needed)
 

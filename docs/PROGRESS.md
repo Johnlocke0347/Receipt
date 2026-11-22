@@ -73,7 +73,7 @@ Executed both compiled artifacts (`target\wasm32-wasip1\release\acceptance-verif
 ## 4. Genuine OutLayer Evidence & Full Intel DCAP Verification (Task 1.4)
 
 ### 4.1 Fixture Provenance (Retrieved `2026-11-13T18:01:26Z` – `18:24:53Z`)
-Stored in [`crates/receipt-core/tests/fixtures/`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/tests/fixtures):
+Stored in [`crates/receipt-core/tests/fixtures/`](../crates/receipt-core/tests/fixtures):
 1. **`worker_approved_measurements.json`** (`69,145` bytes, **129 approved 5-measurement sets**):
    - Source: NEAR Testnet RPC `query` (`call_function`) on `worker.outlayer.testnet::get_approved_measurements({})`.
 2. **`outlayer_attestation_1500.json`** (`id = 791`, `task_id = 1500`, `request_id = 243`, `timestamp = 1771587262`):
@@ -104,11 +104,11 @@ Stored in [`crates/receipt-core/tests/fixtures/`](file:///d:/NEAR%20AI%20HACKATH
 
 ### 4.2 Important Protocol Discovery Fixed During Remediation
 Inspecting upstream `out-layer/outlayer` (`worker/src/tdx_attestation.rs::generate_task_attestation`) and real quotes revealed two critical details that synthetic tests did not catch:
-1. OutLayer hashes `wasm_hash`, `input_hash`, and `output_hash` into `task_hash` as **64-character lowercase ASCII hex strings** (`wh.as_bytes()`), not raw 32-byte arrays, and `attached_usd` as an ASCII decimal string (`"0"`). [`compute_task_hash`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/tdx.rs#L454-L479) was updated to match upstream and verified against real quotes `1500`, `3000`, and `req_1`.
-2. Real Phala `dstack` quotes (`5010` bytes) include `70` trailing zero-padding bytes after `636 + sig_len` (`4940`). [`TdxQuote::parse`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/tdx.rs#L179-L259) now bounds certification data by `sig_len` and verifies that any trailing bytes after `636 + sig_len` are strictly `0x00`.
+1. OutLayer hashes `wasm_hash`, `input_hash`, and `output_hash` into `task_hash` as **64-character lowercase ASCII hex strings** (`wh.as_bytes()`), not raw 32-byte arrays, and `attached_usd` as an ASCII decimal string (`"0"`). [`compute_task_hash`](../crates/receipt-core/src/tdx.rs#L454-L479) was updated to match upstream and verified against real quotes `1500`, `3000`, and `req_1`.
+2. Real Phala `dstack` quotes (`5010` bytes) include `70` trailing zero-padding bytes after `636 + sig_len` (`4940`). [`TdxQuote::parse`](../crates/receipt-core/src/tdx.rs#L179-L259) now bounds certification data by `sig_len` and verifies that any trailing bytes after `636 + sig_len` are strictly `0x00`.
 
 ### 4.3 Full Intel DCAP Verification (`dcap-qvl v0.3.11`)
-Integrated `dcap-qvl = { version = "0.3.11", default-features = false, features = ["contract", "borsh", "std", "rustcrypto"] }` in [`crates/receipt-core/src/tdx.rs`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/tdx.rs#L614-L694) (`verify_dcap_quote` and `verify_full_dcap_attestation`).
+Integrated `dcap-qvl = { version = "0.3.11", default-features = false, features = ["contract", "borsh", "std", "rustcrypto"] }` in [`crates/receipt-core/src/tdx.rs`](../crates/receipt-core/src/tdx.rs#L614-L694) (`verify_dcap_quote` and `verify_full_dcap_attestation`).
 - Validates the PCK certificate chain up to the pinned Intel SGX Root CA.
 - Checks Root CA CRL and PCK CRL revocations.
 - Verifies Intel TCB Info and QE Identity signatures, FMSPC match, and validity windows.
@@ -120,7 +120,7 @@ Integrated `dcap-qvl = { version = "0.3.11", default-features = false, features 
 
 Audited upstream `near/mpc` (`crates/near-mpc-contract-interface/src/types/foreign_chain/` and `crates/near-mpc-sdk/src/foreign_chain/{base.rs,evm.rs}`):
 - `Base` uses the exact same `EvmRpcRequest` and `EvmExtractedValue` structures as `Ethereum`; the only difference in `ForeignChainRpcRequest` is the enum discriminant (`Ethereum = 1`, `Base = 6`).
-- Added [`base_foreign_tx_payload_matches_authoritative_upstream_borsh_layout`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/tests/outlayer_and_mpc_integration.rs#L247-L343) which proves:
+- Added [`base_foreign_tx_payload_matches_authoritative_upstream_borsh_layout`](../crates/receipt-core/tests/outlayer_and_mpc_integration.rs#L247-L343) which proves:
   1. Differential equivalence against the upstream Ethereum insta snapshot (`2ab97999d1e015730271c7d6cbb298af76fd1de7af81926b42a8877bc4f5794e`): serialized bytes for `Ethereum` vs `Base` are identical at every byte except index `1` (`0x01` vs `0x06`).
   2. Byte-for-byte equality between `base_block_and_log_payload` (`[BlockHash, Log { log_index: 0 }]`) and an independent field-by-field Borsh reference encoding constructed directly from the upstream struct definitions.
 - Note on `signing.rs`: The length-prefixed Ed25519 co-signature digest (`chain_id` and `registry_id` prefixed with `u32` LE lengths) is preserved for Buyer/Provider receipt co-signing on `ReceiptRegistry`; it is completely separate from the MPC `ForeignTxSignPayload::V1` Borsh encoding.
@@ -160,17 +160,17 @@ Audited upstream `near/mpc` (`crates/near-mpc-contract-interface/src/types/forei
 ## 7. Phase 2 Implementation & Verification Details
 
 ### 7.1 `crates/receipt-core` Extensions (`eip712` & `mpc_sign`)
-1. **[`crates/receipt-core/src/eip712.rs`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs)**:
-   - Implements [`LoanAuthorizationPacket`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L33-L63), [`eip712_domain_separator`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L80-L93), [`loan_authorization_struct_hash`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L98-L120), [`eip712_loan_authorization_digest`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L126-L148), [`recover_eip712_signer`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L162-L195) (enforcing EIP-2 low-`s` canonical signatures), and [`verify_loan_drawn_log`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/eip712.rs#L219-L330).
-2. **[`crates/receipt-core/src/mpc_sign.rs`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/mpc_sign.rs)**:
-   - Implements the upstream `near/mpc` additive secp256k1 KDF (`SHA3_256("near-mpc-recovery v0.1.0 epsilon derivation:{predecessor_id},{path}")`) in [`derive_mpc_tweak`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/mpc_sign.rs#L207-L216), [`derive_mpc_secp256k1_pubkey`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/mpc_sign.rs#L256-L285), and [`derive_mpc_evm_address`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/mpc_sign.rs#L292-L300).
+1. **[`crates/receipt-core/src/eip712.rs`](../crates/receipt-core/src/eip712.rs)**:
+   - Implements [`LoanAuthorizationPacket`](../crates/receipt-core/src/eip712.rs#L33-L63), [`eip712_domain_separator`](../crates/receipt-core/src/eip712.rs#L80-L93), [`loan_authorization_struct_hash`](../crates/receipt-core/src/eip712.rs#L98-L120), [`eip712_loan_authorization_digest`](../crates/receipt-core/src/eip712.rs#L126-L148), [`recover_eip712_signer`](../crates/receipt-core/src/eip712.rs#L162-L195) (enforcing EIP-2 low-`s` canonical signatures), and [`verify_loan_drawn_log`](../crates/receipt-core/src/eip712.rs#L219-L330).
+2. **[`crates/receipt-core/src/mpc_sign.rs`](../crates/receipt-core/src/mpc_sign.rs)**:
+   - Implements the upstream `near/mpc` additive secp256k1 KDF (`SHA3_256("near-mpc-recovery v0.1.0 epsilon derivation:{predecessor_id},{path}")`) in [`derive_mpc_tweak`](../crates/receipt-core/src/mpc_sign.rs#L207-L216), [`derive_mpc_secp256k1_pubkey`](../crates/receipt-core/src/mpc_sign.rs#L256-L285), and [`derive_mpc_evm_address`](../crates/receipt-core/src/mpc_sign.rs#L292-L300).
    - Verified against live `v1.signer-prod.testnet` RPC (`https://test.rpc.fastnear.com`):
      - `public_key({"domain_id": 0})`: `secp256k1:4NfTiv3UsGahebgTaHyD9vF8KYKMBnfd6kh94mK6xv8fGBiJB8TBtFMP5WWXz6B89Ac1fbpzPwAvoyQebemHFwx3`
      - `public_key({"domain_id": 3})`: `secp256k1:2KGCoy2pZt7n85QfJnQzCT1eHySuNpquUfNc8ySpRbr15F5kqU7agJYjfo5RkrzNd4tZimDFv2wAZri7RRZ32qj1`
-     - `derived_public_key({"path": "receipt-credit-vault-v1", "predecessor": "receipt-registry.testnet", "domain_id": 0})`: `secp256k1:4BUaArkKFhhnaUmFaxQ3ZDFJKScvpShfeQSo2rsDgLMj3SvfFCuVvZgtDbsntZYmgShfPynEJhYm6GiuEShHvzMS` (matches `derive_mpc_secp256k1_pubkey` byte-for-byte in unit test [`live_testnet_domain_keys_parse_and_roundtrip`](file:///d:/NEAR%20AI%20HACKATHON/crates/receipt-core/src/mpc_sign.rs#L308-L334)).
+     - `derived_public_key({"path": "receipt-credit-vault-v1", "predecessor": "receipt-registry.testnet", "domain_id": 0})`: `secp256k1:4BUaArkKFhhnaUmFaxQ3ZDFJKScvpShfeQSo2rsDgLMj3SvfFCuVvZgtDbsntZYmgShfPynEJhYm6GiuEShHvzMS` (matches `derive_mpc_secp256k1_pubkey` byte-for-byte in unit test [`live_testnet_domain_keys_parse_and_roundtrip`](../crates/receipt-core/src/mpc_sign.rs#L308-L334)).
 
 ### 7.2 `crates/near-receipt-registry` (`near-sdk` v5)
-Implemented in [`crates/near-receipt-registry/src/lib.rs`](file:///d:/NEAR%20AI%20HACKATHON/crates/near-receipt-registry/src/lib.rs):
+Implemented in [`crates/near-receipt-registry/src/lib.rs`](../crates/near-receipt-registry/src/lib.rs):
 - **Measurement Management**: `add_approved_measurement`, `add_approved_measurements_batch`, `sync_approved_measurements` (cross-contract call to `worker.outlayer.testnet::get_approved_measurements`), and `on_measurements_synced`.
 - **Receipt Registration (`register_receipt`)**:
   - Enforces `WorkOutcome::Pass`, canonical `evidence_commitment` and `receipt_id`, optional `expected_wasm_hashes` allowlist, `(provider_pubkey, nonce)` replay protection, Buyer + Provider domain-separated Ed25519 co-signatures, OutLayer task metadata bindings (`wasm_hash`, `input_hash`, `output_hash`), TDX Quote v4 binary parsing, approved worker measurement membership, ECDSA P-256 quote signature + QE report binding, and `report_data[0..32] == task_hash`.
@@ -182,8 +182,8 @@ Implemented in [`crates/near-receipt-registry/src/lib.rs`](file:///d:/NEAR%20AI%
   - Callback verifies `resp.payload_hash == expected_payload_hash` and cryptographically verifies `resp.signature` against `foreign_tx_domain_root_pubkey` (`domain_id: 3`) before transitioning the receipt to `ConsumedVerified` and appending a `ConsequenceNode` to `provider_credit_graph`.
 
 ### 7.3 Base Sepolia Solidity Contracts (`contracts/base-sepolia/`)
-- **[`MockCreditUSDC.sol`](file:///d:/NEAR%20AI%20HACKATHON/contracts/base-sepolia/MockCreditUSDC.sol)**: 6-decimal ERC-20 testnet credit asset (`mUSDC`) with owner-gated `mint`.
-- **[`ReceiptCreditVault.sol`](file:///d:/NEAR%20AI%20HACKATHON/contracts/base-sepolia/ReceiptCreditVault.sol)**:
+- **[`MockCreditUSDC.sol`](../contracts/base-sepolia/MockCreditUSDC.sol)**: 6-decimal ERC-20 testnet credit asset (`mUSDC`) with owner-gated `mint`.
+- **[`ReceiptCreditVault.sol`](../contracts/base-sepolia/ReceiptCreditVault.sol)**:
   - Stores `immutable nearAuthorizedSigner`, `immutable creditToken`, `immutable lenderId`, `immutable DOMAIN_SEPARATOR`, and `mapping(bytes32 => bool) public consumedReceipts`.
   - `drawCredit` enforces `block.timestamp <= deadline`, non-zero parameters, `!consumedReceipts[receiptId]`, EIP-2 low-`s` (`uint256(s) <= SECP256K1N_HALF`) and `v in {27, 28}`, and `ecrecover(digest, v, r, s) == nearAuthorizedSigner`.
   - Updates `consumedReceipts[receiptId] = true` and emits `LoanDrawn` **before** calling `creditToken.transfer(borrower, principal)` so `LoanDrawn` is deterministically at `log_index: 0` in the transaction receipt for NEAR MPC `EvmExtractor::Log { log_index: 0 }`.
@@ -205,12 +205,12 @@ Implemented in [`crates/near-receipt-registry/src/lib.rs`](file:///d:/NEAR%20AI%
 - `cargo test --workspace`: **69 passed, 0 failed**:
   - `receipt-core`: 43 unit tests + 7 genuine OutLayer/MPC integration tests = **50 passed**
   - `acceptance-verifier-wasm`: **8 passed**
-  - `near-receipt-registry`: 10 unit/negative state-machine tests + 1 `revm` cross-stack EVM integration test ([`evm_cross_chain_integration.rs`](file:///d:/NEAR%20AI%20HACKATHON/crates/near-receipt-registry/tests/evm_cross_chain_integration.rs)) = **11 passed**
+  - `near-receipt-registry`: 10 unit/negative state-machine tests + 1 `revm` cross-stack EVM integration test ([`evm_cross_chain_integration.rs`](../crates/near-receipt-registry/tests/evm_cross_chain_integration.rs)) = **11 passed**
 - `uv run pytest -q`, `uv run ruff check .`, `uv run mypy .`: **All passed** (exit code 0)
 
 ### 7.6 Phase 3 Live Testnet Deployment & End-to-End Cross-Chain Verification (`demo_e2e.py`)
 
-Executed [`src/receipt_orchestrator/probe.py`](file:///d:/NEAR%20AI%20HACKATHON/src/receipt_orchestrator/probe.py) and [`src/receipt_orchestrator/demo_e2e.py`](file:///d:/NEAR%20AI%20HACKATHON/src/receipt_orchestrator/demo_e2e.py) against live **NEAR Testnet** (`receipt-registry.testnet`, `worker.outlayer.testnet`, `v1.signer-prod.testnet`) and **Base Sepolia** (`chainId = 84532`).
+Executed [`src/receipt_orchestrator/probe.py`](../src/receipt_orchestrator/probe.py) and [`src/receipt_orchestrator/demo_e2e.py`](../src/receipt_orchestrator/demo_e2e.py) against live **NEAR Testnet** (`receipt-registry.testnet`, `worker.outlayer.testnet`, `v1.signer-prod.testnet`) and **Base Sepolia** (`chainId = 84532`).
 
 #### Live Deployed Contracts & Derived MPC Signer
 - **NEAR Receipt Registry Account**: `receipt-registry.testnet`
