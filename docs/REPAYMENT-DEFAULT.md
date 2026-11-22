@@ -4,6 +4,7 @@
 > **Baseline:** [`contracts/base-sepolia/ReceiptCreditVault.sol`](../contracts/base-sepolia/ReceiptCreditVault.sol), [`crates/near-receipt-registry/src/lib.rs`](../crates/near-receipt-registry/src/lib.rs), [`crates/receipt-core/src/receipt.rs`](../crates/receipt-core/src/receipt.rs), [`crates/receipt-core/src/eip712.rs`](../crates/receipt-core/src/eip712.rs), [`crates/receipt-core/src/mpc_foreign_tx.rs`](../crates/receipt-core/src/mpc_foreign_tx.rs), and [`crates/receipt-core/src/confidential.rs`](../crates/receipt-core/src/confidential.rs).  
 > **Scope:** Architectural & contract specification only (no contract changes implemented in this commit).
 
+> **Status:** Design only, not implemented. All parameters (tiers, caps, 15% first-loss coverage, 40/60 yield split) are illustrative.
 ---
 
 ## 1. Executive Summary & Lifecycle Extension
