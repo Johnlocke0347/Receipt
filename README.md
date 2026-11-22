@@ -179,6 +179,25 @@ Executed from a clean clone of `hardening-post-submission` (checkpointed in [`ar
 
 ---
 
+## Post-submission progress
+
+The original hackathon submission is preserved unmodified on `main` / annotated tag [`submitted-v1`](https://github.com/Johnlocke0347/Receipt/tree/submitted-v1) (`b55fedf1929d3ced523b9fa51f33119216834625`, tag object `ad24d4f25e1be994d8b73d3152639308d8a795de`). Work on `hardening-post-submission` adds the following security hardening and roadmap milestones (see [`SECURITY-HARDENING.md`](./SECURITY-HARDENING.md) for commit hashes and failing/passing regression proofs):
+
+### What Was Hardened
+1. **Borrower and credit limit bound into the co-signed receipt (`210fd36`):** Added `borrower_evm_address: [u8; 20]` and `max_credit_principal: u128` to `ReceiptSigningPayloadV1` and `ReceiptV1`, validated non-zero bounds on registration, and enforced exact borrower match and `principal_amount <= receipt.max_credit_principal` inside `ReceiptRegistry::authorize_loan`.
+2. **`authorize_loan` restricted to the provider (`54d0a37`):** Enforced `rt::predecessor_account_id().as_str() == receipt.provider_identity` so third-party accounts cannot lock or front-run a verified receipt's loan authorization.
+3. **OutLayer TDX quote task ID consumption (`04322dd`):** Added `consumed_task_ids: BTreeSet<u64>` (and `is_task_id_consumed(task_id)`) in `ReceiptRegistry::register_receipt` so a single OutLayer TDX quote (`task_id`) cannot be replayed across multiple receipts with incrementing nonces.
+4. **Work outcome committed into the enclave output hash (`e3e6535`):** Introduced `enclave_output_hash(outcome, raw_enclave_output_hash) = SHA256("RECEIPT_OUTCOME_OUTPUT_V1" || [outcome as u8] || raw_enclave_output_hash)` and enforced it during `register_receipt` while preserving the raw `outlayer_task_meta.output_hash` check against TDX `report_data[0..32]`.
+5. **Apache-2.0 `LICENSE` added (`c8d3e9a`, `4df2e5b`):** Added a root Apache-2.0 [`LICENSE`](./LICENSE) and aligned `Cargo.toml`, `pyproject.toml`, and Solidity SPDX headers (`MockCreditUSDC.sol`, `ReceiptCreditVault.sol`).
+6. **Live self-verifier execution via OutLayer FastFS (`3eeb83e`, `8a53c89`):** Compiled `acceptance-verifier-wasm` to `wasm32-wasip1`, uploaded it to FastFS (`WasmUrl`), executed it inside a live `worker.outlayer.testnet` Intel TDX enclave (`request_id = 106440`, `task_id = 303286`), and verified the full hardened loop on `receipt-v2-test-20261121.testnet` and Base Sepolia (`0xfbef17bd16fcfafddc5836db9f70850068d881f4`).
+
+### Planned Next Steps
+- **Repayment and default handling on the Base vault:** Extend `ReceiptCreditVault.sol` beyond disbursement-only credit draws to track principal + accrued interest repayment, maturity deadlines, default slashing/liquidation triggers, and MPC Read RPC repayment attestations back to NEAR.
+- **Agent Market financing SDK:** Package receipt co-signing, OutLayer TDX attestation requests, Chain Signatures loan authorization, and EVM credit draw/repayment into a drop-in TypeScript/Python SDK for autonomous agent marketplaces.
+- **Lender dashboard:** Build an operator and liquidity-provider interface displaying live NEAR receipt consequence graphs (`RegisteredVerified` → `LoanAuthorized` → `ConsumedVerified`), TDX measurement allowlists, active Base vault utilization, and per-provider credit history.
+
+---
+
 ## Known Gaps (Testnet Scope)
 
 ### Closed on `hardening-post-submission` (Present in `submitted-v1`)
