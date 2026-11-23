@@ -19,8 +19,14 @@ use crate::hexser;
 pub const MAX_EXTRACTORS_PER_REQUEST: usize = 32;
 /// `DomainPurpose::ForeignTx` domain used for `verify_foreign_transaction` on testnet.
 pub const FOREIGN_TX_DOMAIN_ID: u64 = 3;
-/// Signature canonical event signature of the Base Sepolia vault event.
+/// Signature canonical event signature of the Base Sepolia `LoanDrawn` vault event.
 pub const LOAN_DRAWN_SIGNATURE: &str = "LoanDrawn(bytes32,address,uint256,bytes32,bytes32)";
+/// Canonical event signature of the Base Sepolia `LoanRepaid` vault event.
+pub const LOAN_REPAID_SIGNATURE: &str =
+    "LoanRepaid(bytes32,address,uint256,uint256,bytes32,bytes32)";
+/// Canonical event signature of the Base Sepolia `LoanDefaulted` vault event.
+pub const LOAN_DEFAULTED_SIGNATURE: &str =
+    "LoanDefaulted(bytes32,address,uint256,uint256,bytes32,bytes32)";
 
 /// 32-byte hash (hex in JSON).
 #[derive(
@@ -291,6 +297,18 @@ pub fn verify_foreign_transaction_args(
 #[must_use]
 pub fn loan_drawn_topic0() -> [u8; 32] {
     Keccak256::digest(LOAN_DRAWN_SIGNATURE.as_bytes()).into()
+}
+
+/// Keccak-256 topic0 of [`LOAN_REPAID_SIGNATURE`].
+#[must_use]
+pub fn loan_repaid_topic0() -> [u8; 32] {
+    Keccak256::digest(LOAN_REPAID_SIGNATURE.as_bytes()).into()
+}
+
+/// Keccak-256 topic0 of [`LOAN_DEFAULTED_SIGNATURE`].
+#[must_use]
+pub fn loan_defaulted_topic0() -> [u8; 32] {
+    Keccak256::digest(LOAN_DEFAULTED_SIGNATURE.as_bytes()).into()
 }
 
 #[cfg(test)]

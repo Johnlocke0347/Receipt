@@ -13,6 +13,7 @@
 //!    calling `v1.signer-prod.testnet::verify_foreign_transaction` (`domain_id: 3`).
 
 #![allow(missing_docs, clippy::missing_panics_doc)]
+#![cfg_attr(target_arch = "wasm32", allow(clippy::too_many_arguments))]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,7 +29,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_types::{AccountId, Gas, NearToken, PromiseError, U128};
 #[cfg(not(target_arch = "wasm32"))]
-pub use rt::set_test_context;
+pub use rt::{set_test_context, set_test_timestamp};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod host_types {
@@ -144,8 +145,9 @@ mod host_types {
 }
 
 use receipt_core::eip712::{
-    eip712_loan_authorization_digest, pubkey64_to_evm_address, verify_loan_drawn_log,
-    LoanAuthorizationPacket, BASE_SEPOLIA_CAIP2, BASE_SEPOLIA_CHAIN_ID,
+    eip712_loan_authorization_digest, pubkey64_to_evm_address, verify_loan_defaulted_log,
+    verify_loan_drawn_log, verify_loan_repaid_log, LoanAuthorizationPacket, BASE_SEPOLIA_CAIP2,
+    BASE_SEPOLIA_CHAIN_ID,
 };
 use receipt_core::hexser;
 use receipt_core::mpc_foreign_tx::{
@@ -167,6 +169,12 @@ use receipt_core::tdx::{
 
 /// Default OutLayer worker measurement registry on NEAR Testnet.
 pub const OUTLAYER_WORKER_TESTNET_ACCOUNT: &str = "worker.outlayer.testnet";
+/// Trailing revenue window for underwriting (`14` days = `1,209,600` seconds).
+pub const TRAILING_REVENUE_WINDOW_SECS: u64 = 1_209_600;
+/// Default fixed hard advance cap (`250 USDC` in 6-decimal minimal units; overrideable on deployment).
+pub const DEFAULT_FIXED_ADVANCE_CAP: u128 = 250_000_000;
+/// Default minimum number of distinct independent payers required to unlock revenue advances.
+pub const DEFAULT_MIN_DISTINCT_PAYERS: u32 = 2;
 /// Gas attached to outbound MPC `sign` and `verify_foreign_transaction` calls (`35 TGas`).
 const MPC_CALL_GAS: Gas = Gas::from_tgas(35);
 /// Gas attached to local callback handlers (`15 TGas`).
@@ -217,6 +225,11 @@ mod rt {
     }
 
     #[cfg(target_arch = "wasm32")]
+    pub fn block_timestamp_secs() -> u64 {
+        near_sdk::env::block_timestamp() / 1_000_000_000
+    }
+
+    #[cfg(target_arch = "wasm32")]
     pub fn panic_str(msg: &str) -> ! {
         near_sdk::env::panic_str(msg)
     }
@@ -229,6 +242,7 @@ mod rt {
         current_account_id: AccountId,
         predecessor_account_id: AccountId,
         attached_deposit: NearToken,
+        block_timestamp_secs: u64,
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -237,6 +251,7 @@ mod rt {
             current_account_id: "receipt-registry.testnet".parse().unwrap(),
             predecessor_account_id: "owner.testnet".parse().unwrap(),
             attached_deposit: NearToken::from_yoctonear(0),
+            block_timestamp_secs: 1_771_590_000,
         });
     }
 
@@ -247,6 +262,13 @@ mod rt {
             borrow.current_account_id = current.parse().unwrap();
             borrow.predecessor_account_id = predecessor.parse().unwrap();
             borrow.attached_deposit = NearToken::from_yoctonear(deposit_yocto);
+        });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_test_timestamp(ts_secs: u64) {
+        CTX.with(|c| {
+            c.borrow_mut().block_timestamp_secs = ts_secs;
         });
     }
 
@@ -263,6 +285,11 @@ mod rt {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn attached_deposit() -> NearToken {
         CTX.with(|c| c.borrow().attached_deposit)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn block_timestamp_secs() -> u64 {
+        CTX.with(|c| c.borrow().block_timestamp_secs)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -288,8 +315,22 @@ pub trait ReceiptRegistryCallbacks {
         #[callback_result] call_result: Result<MpcSecp256k1Signature, PromiseError>,
     ) -> Option<LoanAuthorizationPacket>;
 
-    /// Callback after `v1.signer-prod.testnet::verify_foreign_transaction`.
+    /// Callback after `v1.signer-prod.testnet::verify_foreign_transaction` for disbursement.
     fn on_foreign_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        #[callback_result] call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool;
+
+    /// Callback after `v1.signer-prod.testnet::verify_foreign_transaction` for repayment.
+    fn on_repayment_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        #[callback_result] call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool;
+
+    /// Callback after `v1.signer-prod.testnet::verify_foreign_transaction` for default.
+    fn on_default_tx_verified(
         &mut self,
         receipt_id: [u8; 32],
         #[callback_result] call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
@@ -308,6 +349,10 @@ pub struct PendingLoanAuthorization {
     pub borrower_evm_address: [u8; 20],
     /// Principal amount in minimal credit token units.
     pub principal_amount: u128,
+    /// Fixed financing fee in minimal credit token units.
+    pub fee_amount: u128,
+    /// Loan maturity timestamp (UNIX seconds).
+    pub maturity_at: u64,
     /// Evidence commitment from the registered receipt.
     #[serde(with = "hexser")]
     pub evidence_commitment: [u8; 32],
@@ -342,6 +387,107 @@ pub struct PendingConsequenceVerification {
     /// Expected `SHA256(Borsh(ForeignTxSignPayload::V1))`.
     #[serde(with = "hexser")]
     pub expected_payload_hash: [u8; 32],
+}
+
+/// In-flight repayment verification parameters saved between
+/// `verify_loan_repayment` and `on_repayment_tx_verified`.
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingRepaymentVerification {
+    /// Receipt identifier (`bytes32`).
+    #[serde(with = "hexser")]
+    pub receipt_id: [u8; 32],
+    /// Base Sepolia transaction hash (`bytes32`).
+    #[serde(with = "hexser")]
+    pub base_tx_hash: [u8; 32],
+    /// Base Sepolia block hash (`bytes32`).
+    #[serde(with = "hexser")]
+    pub base_block_hash: [u8; 32],
+    /// 32-byte `lenderId` extracted from `LoanRepaid` `topics[3]`.
+    #[serde(with = "hexser")]
+    pub lender_id: [u8; 32],
+    /// Repaid token units extracted from `LoanRepaid`.
+    pub amount_paid: u128,
+    /// Remaining balance after payment (`0` means fully repaid).
+    pub remaining_balance: u128,
+    /// Expected `SHA256(Borsh(ForeignTxSignPayload::V1))`.
+    #[serde(with = "hexser")]
+    pub expected_payload_hash: [u8; 32],
+}
+
+/// In-flight default verification parameters saved between
+/// `verify_loan_default` and `on_default_tx_verified`.
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingDefaultVerification {
+    /// Receipt identifier (`bytes32`).
+    #[serde(with = "hexser")]
+    pub receipt_id: [u8; 32],
+    /// Base Sepolia transaction hash (`bytes32`).
+    #[serde(with = "hexser")]
+    pub base_tx_hash: [u8; 32],
+    /// Base Sepolia block hash (`bytes32`).
+    #[serde(with = "hexser")]
+    pub base_block_hash: [u8; 32],
+    /// 32-byte `lenderId` extracted from `LoanDefaulted` `topics[3]`.
+    #[serde(with = "hexser")]
+    pub lender_id: [u8; 32],
+    /// Unpaid principal slashed in the Base default event.
+    pub unpaid_principal: u128,
+    /// First-loss reserves absorbed in the Base default event.
+    pub first_loss_absorbed: u128,
+    /// Expected `SHA256(Borsh(ForeignTxSignPayload::V1))`.
+    #[serde(with = "hexser")]
+    pub expected_payload_hash: [u8; 32],
+}
+
+/// Provider repayment and default profile tracked by the registry.
+#[derive(
+    BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq,
+)]
+pub struct ProviderCreditProfile {
+    /// Total loans verified as drawn (`ConsumedVerified`).
+    pub total_loans_drawn: u32,
+    /// Total loans verified as fully repaid (`RepaidVerified`).
+    pub total_loans_repaid: u32,
+    /// Total verified defaults (`DefaultedVerified`).
+    pub defaults_count: u32,
+    /// Cumulative principal repaid cleanly across all loans.
+    pub cumulative_repaid_principal: u128,
+    /// Whether this provider is frozen from new advances due to a verified default.
+    pub credit_frozen: bool,
+}
+
+/// Trailing 14-day attested revenue summary and resulting advance cap for a provider.
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TrailingRevenueView {
+    /// Provider identity queried.
+    pub provider_identity: String,
+    /// UNIX timestamp at which the trailing window ends.
+    pub as_of_timestamp: u64,
+    /// Trailing window length in seconds (`1,209,600` = 14 days).
+    pub window_secs: u64,
+    /// Number of PASS non-defaulted receipts in the trailing window.
+    pub eligible_receipts: u32,
+    /// Number of distinct independent `buyer_pubkey`s across those receipts.
+    pub distinct_payers: u32,
+    /// Total `attested_revenue` summed over eligible receipts.
+    pub total_revenue: U128,
+    /// Configured hard advance cap (`fixed_advance_cap`).
+    pub fixed_advance_cap: U128,
+    /// Required minimum distinct payers (`min_distinct_payers`).
+    pub min_distinct_payers: u32,
+    /// Effective advance cap: `0` if `distinct_payers < min_distinct_payers`, else `min(fixed_advance_cap, 1.5 * total_revenue)`.
+    pub advance_cap: U128,
+}
+
+/// ERC-8004-compatible reputation summary derived from verified loans.
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Erc8004ReputationSummaryView {
+    /// Total verified terminal loan outcomes (repaid + defaulted).
+    pub count: u64,
+    /// Net reputation score (`+100` per repaid loan, `-100` per default).
+    pub value: i128,
+    /// Decimal scaling (`0`).
+    pub value_decimals: u8,
 }
 
 /// Append-only node in a provider's verified Consequence Graph.
@@ -437,8 +583,24 @@ pub struct ReceiptRegistry {
     pub loan_authorizations: BTreeMap<[u8; 32], LoanAuthorizationPacket>,
     /// In-flight consequence verification requests awaiting `verify_foreign_transaction`.
     pub pending_consequence_requests: BTreeMap<[u8; 32], PendingConsequenceVerification>,
+    /// In-flight repayment verification requests awaiting `verify_foreign_transaction`.
+    pub pending_repayment_requests: BTreeMap<[u8; 32], PendingRepaymentVerification>,
+    /// In-flight default verification requests awaiting `verify_foreign_transaction`.
+    pub pending_default_requests: BTreeMap<[u8; 32], PendingDefaultVerification>,
     /// Verified cross-chain consequence graph indexed by `provider_identity`.
     pub provider_credit_graph: BTreeMap<String, Vec<ConsequenceNode>>,
+    /// Owner emergency pause switch blocking new `authorize_loan` requests.
+    pub paused: bool,
+    /// Fixed hard advance ceiling (6-decimal token units, e.g. `5_000_000` for `$5`).
+    pub fixed_advance_cap: u128,
+    /// Minimum distinct independent payers required in trailing 14d revenue window.
+    pub min_distinct_payers: u32,
+    /// Active encumbered receipt keyed by `provider_identity` (blocks second advance until repaid).
+    pub active_encumbered_receipt: BTreeMap<String, [u8; 32]>,
+    /// Active encumbered receipt keyed by `borrower_evm_address`.
+    pub active_encumbered_borrower: BTreeMap<[u8; 20], [u8; 32]>,
+    /// Provider repayment and default profiles keyed by `provider_identity`.
+    pub provider_profiles: BTreeMap<String, ProviderCreditProfile>,
 }
 
 #[cfg_attr(target_arch = "wasm32", near)]
@@ -528,6 +690,23 @@ impl ReceiptRegistry {
             .unwrap_or_else(|e| rt::panic_str(&format!("invalid sign_root_pk: {e}")));
         self.foreign_tx_domain_root_pubkey = parse_near_secp256k1_pubkey(&foreign_tx_root_pk)
             .unwrap_or_else(|e| rt::panic_str(&format!("invalid foreign_tx_root_pk: {e}")));
+    }
+
+    /// Owner emergency pause switch for `authorize_loan`.
+    pub fn set_paused(&mut self, paused: bool) {
+        self.assert_owner();
+        self.paused = paused;
+    }
+
+    /// Configure `fixed_advance_cap` and `min_distinct_payers` underwriting thresholds.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_underwriting_policy(&mut self, fixed_advance_cap: U128, min_distinct_payers: u32) {
+        self.assert_owner();
+        if fixed_advance_cap.0 == 0 || min_distinct_payers == 0 {
+            rt::panic_str("fixed_advance_cap and min_distinct_payers must be positive");
+        }
+        self.fixed_advance_cap = fixed_advance_cap.0;
+        self.min_distinct_payers = min_distinct_payers;
     }
 
     /// Register a verified `ReceiptV1` after enforcing:
@@ -732,6 +911,93 @@ impl ReceiptRegistry {
         self.consumed_task_ids.contains(&task_id)
     }
 
+    /// Return whether new loan authorizations are currently paused by owner.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Compute trailing 14-day attested revenue, distinct independent payer count, and resulting
+    /// `advance_cap = min(fixed_advance_cap, 1.5x trailing_14d_revenue)` for `provider_identity`.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn get_trailing_14d_revenue(
+        &self,
+        provider_identity: String,
+        as_of_timestamp: Option<u64>,
+    ) -> TrailingRevenueView {
+        let cutoff = as_of_timestamp.unwrap_or_else(rt::block_timestamp_secs);
+        self.trailing_revenue_view(&provider_identity, cutoff)
+    }
+
+    /// Return effective current advance cap (`0` if paused, frozen after default, encumbered, or
+    /// below `min_distinct_payers`).
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn compute_advance_cap(
+        &self,
+        provider_identity: String,
+        as_of_timestamp: Option<u64>,
+    ) -> U128 {
+        if self.paused
+            || self
+                .active_encumbered_receipt
+                .contains_key(&provider_identity)
+        {
+            return U128(0);
+        }
+        if let Some(p) = self.provider_profiles.get(&provider_identity) {
+            if p.credit_frozen || p.defaults_count > 0 {
+                return U128(0);
+            }
+        }
+        let cutoff = as_of_timestamp.unwrap_or_else(rt::block_timestamp_secs);
+        self.trailing_revenue_view(&provider_identity, cutoff)
+            .advance_cap
+    }
+
+    /// Fetch repayment & default profile for `provider_identity`.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn get_provider_credit_profile(
+        &self,
+        provider_identity: String,
+    ) -> Option<ProviderCreditProfile> {
+        self.provider_profiles.get(&provider_identity).cloned()
+    }
+
+    /// Fetch the active encumbered `receipt_id` hex string for `provider_identity`, if any.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn get_active_encumbered_receipt(&self, provider_identity: String) -> Option<String> {
+        self.active_encumbered_receipt
+            .get(&provider_identity)
+            .map(hex::encode)
+    }
+
+    /// ERC-8004-compatible reputation summary derived from verified repaid and defaulted loans.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn get_erc8004_reputation_summary(
+        &self,
+        provider_identity: String,
+    ) -> Erc8004ReputationSummaryView {
+        let profile = self
+            .provider_profiles
+            .get(&provider_identity)
+            .cloned()
+            .unwrap_or_default();
+        let repaid = u64::from(profile.total_loans_repaid);
+        let defaulted = u64::from(profile.defaults_count);
+        let value =
+            i128::from(profile.total_loans_repaid) * 100 - i128::from(profile.defaults_count) * 100;
+        Erc8004ReputationSummaryView {
+            count: repaid + defaulted,
+            value,
+            value_decimals: 0,
+        }
+    }
+
     fn assert_owner(&self) {
         if rt::predecessor_account_id() != self.owner {
             rt::panic_str("only contract owner may call this method");
@@ -762,12 +1028,14 @@ impl ReceiptRegistry {
     }
 
     #[payable]
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     pub fn authorize_loan(
         &mut self,
         receipt_id_hex: String,
         borrower_evm_address_hex: String,
         principal_amount: U128,
+        fee_amount: U128,
+        maturity_at: u64,
         base_vault_address_hex: String,
         deadline: u64,
     ) -> OutboundPromise {
@@ -775,6 +1043,8 @@ impl ReceiptRegistry {
             receipt_id_hex,
             borrower_evm_address_hex,
             principal_amount,
+            fee_amount,
+            maturity_at,
             base_vault_address_hex,
             deadline,
         )
@@ -816,6 +1086,62 @@ impl ReceiptRegistry {
     ) -> bool {
         self.on_foreign_tx_verified_internal(receipt_id, call_result)
     }
+
+    #[payable]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn verify_loan_repayment(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        self.verify_loan_repayment_internal(
+            receipt_id_hex,
+            base_tx_hash_hex,
+            base_block_hash_hex,
+            expected_log,
+            finality,
+        )
+    }
+
+    #[private]
+    pub fn on_repayment_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        #[callback_result] call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        self.on_repayment_tx_verified_internal(receipt_id, call_result)
+    }
+
+    #[payable]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn verify_loan_default(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        self.verify_loan_default_internal(
+            receipt_id_hex,
+            base_tx_hash_hex,
+            base_block_hash_hex,
+            expected_log,
+            finality,
+        )
+    }
+
+    #[private]
+    pub fn on_default_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        #[callback_result] call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        self.on_default_tx_verified_internal(receipt_id, call_result)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -836,11 +1162,14 @@ impl ReceiptRegistry {
         self.on_measurements_synced_internal(call_result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn authorize_loan(
         &mut self,
         receipt_id_hex: String,
         borrower_evm_address_hex: String,
         principal_amount: U128,
+        fee_amount: U128,
+        maturity_at: u64,
         base_vault_address_hex: String,
         deadline: u64,
     ) -> OutboundPromise {
@@ -848,6 +1177,8 @@ impl ReceiptRegistry {
             receipt_id_hex,
             borrower_evm_address_hex,
             principal_amount,
+            fee_amount,
+            maturity_at,
             base_vault_address_hex,
             deadline,
         )
@@ -885,6 +1216,64 @@ impl ReceiptRegistry {
     ) -> bool {
         self.on_foreign_tx_verified_internal(receipt_id, call_result)
     }
+
+    pub fn verify_loan_repayment(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        self.verify_loan_repayment_internal(
+            receipt_id_hex,
+            base_tx_hash_hex,
+            base_block_hash_hex,
+            expected_log,
+            finality,
+        )
+    }
+
+    pub fn on_repayment_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        self.on_repayment_tx_verified_internal(receipt_id, call_result)
+    }
+
+    pub fn verify_loan_default(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        self.verify_loan_default_internal(
+            receipt_id_hex,
+            base_tx_hash_hex,
+            base_block_hash_hex,
+            expected_log,
+            finality,
+        )
+    }
+
+    pub fn on_default_tx_verified(
+        &mut self,
+        receipt_id: [u8; 32],
+        call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        self.on_default_tx_verified_internal(receipt_id, call_result)
+    }
+}
+
+struct ForeignTxVerificationSpec {
+    deposit: NearToken,
+    base_tx_hash: [u8; 32],
+    base_block_hash: [u8; 32],
+    expected_log: EvmLog,
+    finality: EvmFinality,
 }
 
 impl ReceiptRegistry {
@@ -931,7 +1320,63 @@ impl ReceiptRegistry {
             pending_loan_requests: BTreeMap::new(),
             loan_authorizations: BTreeMap::new(),
             pending_consequence_requests: BTreeMap::new(),
+            pending_repayment_requests: BTreeMap::new(),
+            pending_default_requests: BTreeMap::new(),
             provider_credit_graph: BTreeMap::new(),
+            paused: false,
+            fixed_advance_cap: DEFAULT_FIXED_ADVANCE_CAP,
+            min_distinct_payers: DEFAULT_MIN_DISTINCT_PAYERS,
+            active_encumbered_receipt: BTreeMap::new(),
+            active_encumbered_borrower: BTreeMap::new(),
+            provider_profiles: BTreeMap::new(),
+        }
+    }
+
+    fn trailing_revenue_view(
+        &self,
+        provider_identity: &str,
+        as_of_timestamp: u64,
+    ) -> TrailingRevenueView {
+        let window_start = as_of_timestamp.saturating_sub(TRAILING_REVENUE_WINDOW_SECS);
+        let max_created = as_of_timestamp.saturating_add(60);
+        let mut eligible_receipts = 0u32;
+        let mut total_revenue = 0u128;
+        let mut distinct_buyers: BTreeSet<[u8; 32]> = BTreeSet::new();
+
+        for r in self.receipts.values() {
+            if r.provider_identity == provider_identity
+                && r.outcome == WorkOutcome::Pass
+                && !matches!(
+                    r.consequence_state,
+                    ConsequenceState::RejectedOrFailed | ConsequenceState::DefaultedVerified
+                )
+                && r.created_at >= window_start
+                && r.created_at <= max_created
+            {
+                eligible_receipts = eligible_receipts.saturating_add(1);
+                total_revenue = total_revenue.saturating_add(r.attested_revenue);
+                distinct_buyers.insert(r.buyer_pubkey);
+            }
+        }
+
+        let distinct_payers = u32::try_from(distinct_buyers.len()).unwrap_or(u32::MAX);
+        let revenue_150_pct = total_revenue.saturating_mul(3) / 2;
+        let advance_cap = if distinct_payers >= self.min_distinct_payers {
+            self.fixed_advance_cap.min(revenue_150_pct)
+        } else {
+            0
+        };
+
+        TrailingRevenueView {
+            provider_identity: provider_identity.to_string(),
+            as_of_timestamp,
+            window_secs: TRAILING_REVENUE_WINDOW_SECS,
+            eligible_receipts,
+            distinct_payers,
+            total_revenue: U128(total_revenue),
+            fixed_advance_cap: U128(self.fixed_advance_cap),
+            min_distinct_payers: self.min_distinct_payers,
+            advance_cap: U128(advance_cap),
         }
     }
 
@@ -950,15 +1395,86 @@ impl ReceiptRegistry {
         u32::try_from(self.approved_measurements.len()).unwrap_or(u32::MAX)
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    fn validate_authorize_loan_request(
+        &self,
+        receipt_id: [u8; 32],
+        borrower: [u8; 20],
+        principal: u128,
+        maturity_at: u64,
+        base_vault: [u8; 20],
+        now: u64,
+    ) -> ReceiptV1 {
+        if borrower == [0u8; 20] || base_vault == [0u8; 20] || principal == 0 || maturity_at <= now
+        {
+            rt::panic_str(
+                "borrower, base_vault, principal_amount must be non-zero and maturity_at > now",
+            );
+        }
+        if let Some(cfg_vault) = self.configured_base_vault {
+            if base_vault != cfg_vault {
+                rt::panic_str("base_vault_address does not match configured_base_vault");
+            }
+        }
+
+        let Some(receipt_ref) = self.receipts.get(&receipt_id).cloned() else {
+            rt::panic_str("receipt not found");
+        };
+        if rt::predecessor_account_id().as_str() != receipt_ref.provider_identity {
+            rt::panic_str("only receipt.provider_identity may call authorize_loan");
+        }
+        if receipt_ref.outcome != WorkOutcome::Pass {
+            rt::panic_str("only PASS receipts can authorize loans");
+        }
+        if receipt_ref.consequence_state != ConsequenceState::RegisteredVerified {
+            rt::panic_str("receipt is not in RegisteredVerified state");
+        }
+        if borrower != receipt_ref.borrower_evm_address {
+            rt::panic_str(
+                "borrower_evm_address does not match co-signed receipt.borrower_evm_address",
+            );
+        }
+        if principal > receipt_ref.max_credit_principal {
+            rt::panic_str("principal_amount exceeds co-signed receipt.max_credit_principal");
+        }
+        if let Some(profile) = self.provider_profiles.get(&receipt_ref.provider_identity) {
+            if profile.credit_frozen || profile.defaults_count > 0 {
+                rt::panic_str("provider credit is frozen due to prior default");
+            }
+        }
+        if self
+            .active_encumbered_receipt
+            .contains_key(&receipt_ref.provider_identity)
+            || self.active_encumbered_borrower.contains_key(&borrower)
+        {
+            rt::panic_str("active unpaid loan must be repaid before drawing a new advance");
+        }
+
+        let rev = self.trailing_revenue_view(&receipt_ref.provider_identity, now);
+        if rev.distinct_payers < self.min_distinct_payers {
+            rt::panic_str("insufficient distinct independent payers in trailing 14-day window");
+        }
+        if principal > rev.advance_cap.0 {
+            rt::panic_str(
+                "principal_amount exceeds advance_cap = min(fixed_advance_cap, 1.5x trailing 14d revenue)",
+            );
+        }
+        receipt_ref
+    }
+
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
     fn authorize_loan_internal(
         &mut self,
         receipt_id_hex: String,
         borrower_evm_address_hex: String,
         principal_amount: U128,
+        fee_amount: U128,
+        maturity_at: u64,
         base_vault_address_hex: String,
         deadline: u64,
     ) -> OutboundPromise {
+        if self.paused {
+            rt::panic_str("registry is paused by owner");
+        }
         let deposit = rt::attached_deposit();
         if deposit < NearToken::from_yoctonear(1) {
             rt::panic_str("attach at least 1 yoctoNEAR for MPC sign");
@@ -968,42 +1484,25 @@ impl ReceiptRegistry {
             decode_hex_array::<20>(&borrower_evm_address_hex, "borrower_evm_address_hex");
         let base_vault = decode_hex_array::<20>(&base_vault_address_hex, "base_vault_address_hex");
         let principal = principal_amount.0;
+        let fee = fee_amount.0;
+        let now = rt::block_timestamp_secs();
 
-        if borrower == [0u8; 20] || base_vault == [0u8; 20] || principal == 0 {
-            rt::panic_str("borrower, base_vault, and principal_amount must be non-zero");
-        }
-        if let Some(cfg_vault) = self.configured_base_vault {
-            if base_vault != cfg_vault {
-                rt::panic_str("base_vault_address does not match configured_base_vault");
-            }
-        }
-
-        let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
-            rt::panic_str("receipt not found");
-        };
-        if rt::predecessor_account_id().as_str() != receipt.provider_identity {
-            rt::panic_str("only receipt.provider_identity may call authorize_loan");
-        }
-        if receipt.outcome != WorkOutcome::Pass {
-            rt::panic_str("only PASS receipts can authorize loans");
-        }
-        if receipt.consequence_state != ConsequenceState::RegisteredVerified {
-            rt::panic_str("receipt is not in RegisteredVerified state");
-        }
-        if borrower != receipt.borrower_evm_address {
-            rt::panic_str(
-                "borrower_evm_address does not match co-signed receipt.borrower_evm_address",
-            );
-        }
-        if principal > receipt.max_credit_principal {
-            rt::panic_str("principal_amount exceeds co-signed receipt.max_credit_principal");
-        }
+        let receipt_ref = self.validate_authorize_loan_request(
+            receipt_id,
+            borrower,
+            principal,
+            maturity_at,
+            base_vault,
+            now,
+        );
 
         let eip712_digest = eip712_loan_authorization_digest(
             &receipt_id,
             &borrower,
             principal,
-            &receipt.evidence_commitment,
+            fee,
+            maturity_at,
+            &receipt_ref.evidence_commitment,
             &base_vault,
             self.base_chain_id,
             deadline,
@@ -1014,14 +1513,18 @@ impl ReceiptRegistry {
         let args_bytes = serde_json::to_vec(&sign_args).expect("serialize MPC sign args");
 
         // Optimistic lock BEFORE external cross-contract call (CEI / reentrancy defense)
-        receipt.consequence_state = ConsequenceState::LoanAuthorized;
+        if let Some(r) = self.receipts.get_mut(&receipt_id) {
+            r.consequence_state = ConsequenceState::LoanAuthorized;
+        }
         self.pending_loan_requests.insert(
             receipt_id,
             PendingLoanAuthorization {
                 receipt_id,
                 borrower_evm_address: borrower,
                 principal_amount: principal,
-                evidence_commitment: receipt.evidence_commitment,
+                fee_amount: fee,
+                maturity_at,
+                evidence_commitment: receipt_ref.evidence_commitment,
                 base_vault_address: base_vault,
                 chain_id: self.base_chain_id,
                 deadline,
@@ -1092,6 +1595,8 @@ impl ReceiptRegistry {
             receipt_id: pending.receipt_id,
             borrower_evm_address: pending.borrower_evm_address,
             principal_amount: pending.principal_amount,
+            fee_amount: pending.fee_amount,
+            maturity_at: pending.maturity_at,
             evidence_commitment: pending.evidence_commitment,
             base_vault_address: pending.base_vault_address,
             chain_id: pending.chain_id,
@@ -1103,6 +1608,91 @@ impl ReceiptRegistry {
         };
         self.loan_authorizations.insert(receipt_id, packet.clone());
         Some(packet)
+    }
+
+    fn build_and_send_foreign_tx_verification(
+        &self,
+        spec: ForeignTxVerificationSpec,
+        callback_method: &str,
+        receipt_id: [u8; 32],
+    ) -> ([u8; 32], OutboundPromise) {
+        let payload = base_block_and_log_payload(
+            spec.base_tx_hash,
+            spec.finality,
+            spec.base_block_hash,
+            spec.expected_log,
+        )
+        .unwrap_or_else(|e| {
+            rt::panic_str(&format!("failed to build Base foreign tx payload: {e}"))
+        });
+        let expected_payload_hash = payload
+            .compute_msg_hash()
+            .unwrap_or_else(|e| rt::panic_str(&format!("failed to hash foreign tx payload: {e}")));
+        let args = verify_foreign_transaction_args(
+            &payload.request,
+            self.foreign_tx_domain_id,
+            Some(expected_payload_hash),
+        )
+        .unwrap_or_else(|e| rt::panic_str(&format!("invalid foreign tx args: {e}")));
+        let args_bytes =
+            serde_json::to_vec(&args).expect("serialize verify_foreign_transaction args");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = receipt_id;
+
+        #[cfg(target_arch = "wasm32")]
+        let promise = {
+            let cb = match callback_method {
+                "on_foreign_tx_verified" => ext_self::ext(rt::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_foreign_tx_verified(receipt_id),
+                "on_repayment_tx_verified" => ext_self::ext(rt::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_repayment_tx_verified(receipt_id),
+                _ => ext_self::ext(rt::current_account_id())
+                    .with_static_gas(CALLBACK_GAS)
+                    .on_default_tx_verified(receipt_id),
+            };
+            Promise::new(self.mpc_signer_account.clone())
+                .function_call(
+                    "verify_foreign_transaction".to_string(),
+                    args_bytes,
+                    spec.deposit,
+                    MPC_CALL_GAS,
+                )
+                .then(cb)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let promise = OutboundPromise {
+            receiver_id: self.mpc_signer_account.clone(),
+            method_name: "verify_foreign_transaction".to_string(),
+            args: args_bytes,
+            deposit_yocto: spec.deposit.as_yoctonear(),
+            gas: MPC_CALL_GAS.as_gas(),
+            callback_method: callback_method.to_string(),
+        };
+        (expected_payload_hash, promise)
+    }
+
+    fn verify_foreign_tx_response(
+        &self,
+        expected_payload_hash: &[u8; 32],
+        call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> Option<VerifiedFinalityEvidence> {
+        let resp = call_result.ok()?;
+        if &resp.payload_hash.0 != expected_payload_hash {
+            return None;
+        }
+        let (sig_r, sig_s, sig_v) = resp
+            .signature
+            .verify_against_pubkey(expected_payload_hash, &self.foreign_tx_domain_root_pubkey)
+            .ok()?;
+        Some(VerifiedFinalityEvidence {
+            payload_hash: *expected_payload_hash,
+            signature_r: sig_r,
+            signature_s: sig_s,
+            signature_v: sig_v,
+        })
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -1125,12 +1715,15 @@ impl ReceiptRegistry {
         let Some(loan_auth) = self.loan_authorizations.get(&receipt_id).cloned() else {
             rt::panic_str("loan authorization packet not found for receipt_id");
         };
-        let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
-            rt::panic_str("receipt not found");
+        let evidence_commitment = {
+            let Some(receipt) = self.receipts.get(&receipt_id) else {
+                rt::panic_str("receipt not found");
+            };
+            if receipt.consequence_state != ConsequenceState::LoanAuthorized {
+                rt::panic_str("receipt must be in LoanAuthorized state");
+            }
+            receipt.evidence_commitment
         };
-        if receipt.consequence_state != ConsequenceState::LoanAuthorized {
-            rt::panic_str("receipt must be in LoanAuthorized state");
-        }
 
         let lender_id = verify_loan_drawn_log(
             &expected_log,
@@ -1140,29 +1733,25 @@ impl ReceiptRegistry {
             &receipt_id,
             &loan_auth.borrower_evm_address,
             loan_auth.principal_amount,
-            &receipt.evidence_commitment,
+            &evidence_commitment,
         )
         .unwrap_or_else(|e| rt::panic_str(&format!("invalid LoanDrawn log: {e}")));
 
-        let payload =
-            base_block_and_log_payload(base_tx_hash, finality, base_block_hash, expected_log)
-                .unwrap_or_else(|e| {
-                    rt::panic_str(&format!("failed to build Base foreign tx payload: {e}"))
-                });
-        let expected_payload_hash = payload
-            .compute_msg_hash()
-            .unwrap_or_else(|e| rt::panic_str(&format!("failed to hash foreign tx payload: {e}")));
-        let args = verify_foreign_transaction_args(
-            &payload.request,
-            self.foreign_tx_domain_id,
-            Some(expected_payload_hash),
-        )
-        .unwrap_or_else(|e| rt::panic_str(&format!("invalid foreign tx args: {e}")));
-        let args_bytes =
-            serde_json::to_vec(&args).expect("serialize verify_foreign_transaction args");
+        let (expected_payload_hash, promise) = self.build_and_send_foreign_tx_verification(
+            ForeignTxVerificationSpec {
+                deposit,
+                base_tx_hash,
+                base_block_hash,
+                expected_log,
+                finality,
+            },
+            "on_foreign_tx_verified",
+            receipt_id,
+        );
 
-        // Transition state BEFORE external cross-contract call
-        receipt.consequence_state = ConsequenceState::VerificationPending;
+        if let Some(receipt) = self.receipts.get_mut(&receipt_id) {
+            receipt.consequence_state = ConsequenceState::VerificationPending;
+        }
         self.pending_consequence_requests.insert(
             receipt_id,
             PendingConsequenceVerification {
@@ -1173,33 +1762,7 @@ impl ReceiptRegistry {
                 expected_payload_hash,
             },
         );
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            Promise::new(self.mpc_signer_account.clone())
-                .function_call(
-                    "verify_foreign_transaction".to_string(),
-                    args_bytes,
-                    deposit,
-                    MPC_CALL_GAS,
-                )
-                .then(
-                    ext_self::ext(rt::current_account_id())
-                        .with_static_gas(CALLBACK_GAS)
-                        .on_foreign_tx_verified(receipt_id),
-                )
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            OutboundPromise {
-                receiver_id: self.mpc_signer_account.clone(),
-                method_name: "verify_foreign_transaction".to_string(),
-                args: args_bytes,
-                deposit_yocto: deposit.as_yoctonear(),
-                gas: MPC_CALL_GAS.as_gas(),
-                callback_method: "on_foreign_tx_verified".to_string(),
-            }
-        }
+        promise
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -1212,24 +1775,9 @@ impl ReceiptRegistry {
             rt::panic_str("no pending consequence verification for receipt_id");
         };
 
-        let Ok(resp) = call_result else {
-            if let Some(r) = self.receipts.get_mut(&receipt_id) {
-                r.consequence_state = ConsequenceState::LoanAuthorized;
-            }
-            return false;
-        };
-
-        if resp.payload_hash.0 != pending.expected_payload_hash {
-            if let Some(r) = self.receipts.get_mut(&receipt_id) {
-                r.consequence_state = ConsequenceState::LoanAuthorized;
-            }
-            return false;
-        }
-
-        let Ok((sig_r, sig_s, sig_v)) = resp.signature.verify_against_pubkey(
-            &pending.expected_payload_hash,
-            &self.foreign_tx_domain_root_pubkey,
-        ) else {
+        let Some(finality_evidence) =
+            self.verify_foreign_tx_response(&pending.expected_payload_hash, call_result)
+        else {
             if let Some(r) = self.receipts.get_mut(&receipt_id) {
                 r.consequence_state = ConsequenceState::LoanAuthorized;
             }
@@ -1246,18 +1794,21 @@ impl ReceiptRegistry {
             return false;
         };
 
-        let finality_evidence = VerifiedFinalityEvidence {
-            payload_hash: pending.expected_payload_hash,
-            signature_r: sig_r,
-            signature_s: sig_s,
-            signature_v: sig_v,
-        };
-
         receipt.consequence_state = ConsequenceState::ConsumedVerified;
         receipt.foreign_chain_id = Some(BASE_SEPOLIA_CAIP2.to_string());
         receipt.foreign_tx_hash = Some(pending.base_tx_hash);
         receipt.lender_id = Some(hex::encode(pending.lender_id));
         receipt.verified_finality_evidence = Some(finality_evidence.clone());
+
+        self.active_encumbered_receipt
+            .insert(receipt.provider_identity.clone(), receipt_id);
+        self.active_encumbered_borrower
+            .insert(loan_auth.borrower_evm_address, receipt_id);
+        let profile = self
+            .provider_profiles
+            .entry(receipt.provider_identity.clone())
+            .or_default();
+        profile.total_loans_drawn = profile.total_loans_drawn.saturating_add(1);
 
         let node = ConsequenceNode {
             receipt_id,
@@ -1279,6 +1830,236 @@ impl ReceiptRegistry {
             .or_default()
             .push(node);
 
+        true
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn verify_loan_repayment_internal(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        let deposit = rt::attached_deposit();
+        if deposit < NearToken::from_yoctonear(1) {
+            rt::panic_str("attach at least 1 yoctoNEAR for verify_foreign_transaction");
+        }
+        let receipt_id = decode_hex_array::<32>(&receipt_id_hex, "receipt_id_hex");
+        let base_tx_hash = decode_hex_array::<32>(&base_tx_hash_hex, "base_tx_hash_hex");
+        let base_block_hash = decode_hex_array::<32>(&base_block_hash_hex, "base_block_hash_hex");
+
+        let Some(loan_auth) = self.loan_authorizations.get(&receipt_id).cloned() else {
+            rt::panic_str("loan authorization packet not found for receipt_id");
+        };
+        let evidence_commitment = {
+            let Some(receipt) = self.receipts.get(&receipt_id) else {
+                rt::panic_str("receipt not found");
+            };
+            if receipt.consequence_state != ConsequenceState::ConsumedVerified {
+                rt::panic_str("receipt must be in ConsumedVerified state to verify repayment");
+            }
+            receipt.evidence_commitment
+        };
+
+        let (lender_id, amount_paid, remaining_balance) = verify_loan_repaid_log(
+            &expected_log,
+            &loan_auth.base_vault_address,
+            &base_tx_hash,
+            &base_block_hash,
+            &receipt_id,
+            &loan_auth.borrower_evm_address,
+            &evidence_commitment,
+        )
+        .unwrap_or_else(|e| rt::panic_str(&format!("invalid LoanRepaid log: {e}")));
+
+        let (expected_payload_hash, promise) = self.build_and_send_foreign_tx_verification(
+            ForeignTxVerificationSpec {
+                deposit,
+                base_tx_hash,
+                base_block_hash,
+                expected_log,
+                finality,
+            },
+            "on_repayment_tx_verified",
+            receipt_id,
+        );
+
+        if let Some(receipt) = self.receipts.get_mut(&receipt_id) {
+            receipt.consequence_state = ConsequenceState::RepaymentVerificationPending;
+        }
+        self.pending_repayment_requests.insert(
+            receipt_id,
+            PendingRepaymentVerification {
+                receipt_id,
+                base_tx_hash,
+                base_block_hash,
+                lender_id,
+                amount_paid,
+                remaining_balance,
+                expected_payload_hash,
+            },
+        );
+        promise
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn on_repayment_tx_verified_internal(
+        &mut self,
+        receipt_id: [u8; 32],
+        call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        let Some(pending) = self.pending_repayment_requests.remove(&receipt_id) else {
+            rt::panic_str("no pending repayment verification for receipt_id");
+        };
+        let Some(finality_evidence) =
+            self.verify_foreign_tx_response(&pending.expected_payload_hash, call_result)
+        else {
+            if let Some(r) = self.receipts.get_mut(&receipt_id) {
+                r.consequence_state = ConsequenceState::ConsumedVerified;
+            }
+            return false;
+        };
+
+        let Some(loan_auth) = self.loan_authorizations.get(&receipt_id).cloned() else {
+            return false;
+        };
+        let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
+            return false;
+        };
+
+        if pending.remaining_balance == 0 {
+            receipt.consequence_state = ConsequenceState::RepaidVerified;
+            receipt.foreign_tx_hash = Some(pending.base_tx_hash);
+            receipt.verified_finality_evidence = Some(finality_evidence);
+            self.active_encumbered_receipt
+                .remove(&receipt.provider_identity);
+            self.active_encumbered_borrower
+                .remove(&loan_auth.borrower_evm_address);
+            let profile = self
+                .provider_profiles
+                .entry(receipt.provider_identity.clone())
+                .or_default();
+            profile.total_loans_repaid = profile.total_loans_repaid.saturating_add(1);
+            profile.cumulative_repaid_principal = profile
+                .cumulative_repaid_principal
+                .saturating_add(loan_auth.principal_amount);
+        } else {
+            receipt.consequence_state = ConsequenceState::ConsumedVerified;
+        }
+        true
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn verify_loan_default_internal(
+        &mut self,
+        receipt_id_hex: String,
+        base_tx_hash_hex: String,
+        base_block_hash_hex: String,
+        expected_log: EvmLog,
+        finality: EvmFinality,
+    ) -> OutboundPromise {
+        let deposit = rt::attached_deposit();
+        if deposit < NearToken::from_yoctonear(1) {
+            rt::panic_str("attach at least 1 yoctoNEAR for verify_foreign_transaction");
+        }
+        let receipt_id = decode_hex_array::<32>(&receipt_id_hex, "receipt_id_hex");
+        let base_tx_hash = decode_hex_array::<32>(&base_tx_hash_hex, "base_tx_hash_hex");
+        let base_block_hash = decode_hex_array::<32>(&base_block_hash_hex, "base_block_hash_hex");
+
+        let Some(loan_auth) = self.loan_authorizations.get(&receipt_id).cloned() else {
+            rt::panic_str("loan authorization packet not found for receipt_id");
+        };
+        let evidence_commitment = {
+            let Some(receipt) = self.receipts.get(&receipt_id) else {
+                rt::panic_str("receipt not found");
+            };
+            if receipt.consequence_state != ConsequenceState::ConsumedVerified {
+                rt::panic_str("receipt must be in ConsumedVerified state to verify default");
+            }
+            receipt.evidence_commitment
+        };
+
+        let (lender_id, unpaid_principal, first_loss_absorbed) = verify_loan_defaulted_log(
+            &expected_log,
+            &loan_auth.base_vault_address,
+            &base_tx_hash,
+            &base_block_hash,
+            &receipt_id,
+            &loan_auth.borrower_evm_address,
+            &evidence_commitment,
+        )
+        .unwrap_or_else(|e| rt::panic_str(&format!("invalid LoanDefaulted log: {e}")));
+
+        let (expected_payload_hash, promise) = self.build_and_send_foreign_tx_verification(
+            ForeignTxVerificationSpec {
+                deposit,
+                base_tx_hash,
+                base_block_hash,
+                expected_log,
+                finality,
+            },
+            "on_default_tx_verified",
+            receipt_id,
+        );
+
+        if let Some(receipt) = self.receipts.get_mut(&receipt_id) {
+            receipt.consequence_state = ConsequenceState::DefaultVerificationPending;
+        }
+        self.pending_default_requests.insert(
+            receipt_id,
+            PendingDefaultVerification {
+                receipt_id,
+                base_tx_hash,
+                base_block_hash,
+                lender_id,
+                unpaid_principal,
+                first_loss_absorbed,
+                expected_payload_hash,
+            },
+        );
+        promise
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn on_default_tx_verified_internal(
+        &mut self,
+        receipt_id: [u8; 32],
+        call_result: Result<VerifyForeignTransactionResponseDto, PromiseError>,
+    ) -> bool {
+        let Some(pending) = self.pending_default_requests.remove(&receipt_id) else {
+            rt::panic_str("no pending default verification for receipt_id");
+        };
+        let Some(finality_evidence) =
+            self.verify_foreign_tx_response(&pending.expected_payload_hash, call_result)
+        else {
+            if let Some(r) = self.receipts.get_mut(&receipt_id) {
+                r.consequence_state = ConsequenceState::ConsumedVerified;
+            }
+            return false;
+        };
+
+        let Some(loan_auth) = self.loan_authorizations.get(&receipt_id).cloned() else {
+            return false;
+        };
+        let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
+            return false;
+        };
+
+        receipt.consequence_state = ConsequenceState::DefaultedVerified;
+        receipt.foreign_tx_hash = Some(pending.base_tx_hash);
+        receipt.verified_finality_evidence = Some(finality_evidence);
+        self.active_encumbered_receipt
+            .remove(&receipt.provider_identity);
+        self.active_encumbered_borrower
+            .remove(&loan_auth.borrower_evm_address);
+        let profile = self
+            .provider_profiles
+            .entry(receipt.provider_identity.clone())
+            .or_default();
+        profile.defaults_count = profile.defaults_count.saturating_add(1);
+        profile.credit_frozen = true;
         true
     }
 }
@@ -1323,6 +2104,90 @@ mod tests {
         rt::set_test_context("receipt-registry.testnet", predecessor, deposit_yocto);
     }
 
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn build_additional_signed_receipt(
+        contract: &mut ReceiptRegistry,
+        buyer_sk: &Ed25519SigningKey,
+        provider_sk: &Ed25519SigningKey,
+        attestation_json: &str,
+        nonce: u64,
+        created_at: u64,
+        attested_revenue: u128,
+        max_credit_principal: u128,
+    ) -> (ReceiptV1, Vec<u8>, TaskHashInputs) {
+        let record: OutLayerAttestationRecord = serde_json::from_str(attestation_json).unwrap();
+        let quote_bytes = base64::engine::general_purpose::STANDARD
+            .decode(record.tdx_quote.trim())
+            .unwrap();
+        let parsed_quote = TdxQuote::parse(&quote_bytes).unwrap();
+        let task_meta = record.to_v1_task_inputs().unwrap();
+        let wasm_hash = task_meta.wasm_hash.unwrap();
+        let input_hash = task_meta.input_hash.unwrap();
+        let output_hash = hashing::enclave_output_hash(WorkOutcome::Pass, &task_meta.output_hash);
+        setup_context("owner.testnet", 0);
+        contract.add_expected_wasm_hash(hex::encode(wasm_hash));
+
+        let settlement_commitment = hashing::confidential_settlement_commitment(
+            &[0x66u8; 32],
+            attested_revenue,
+            &[0x88u8; 32],
+            &[0x77u8; 32],
+        );
+        let evidence = hashing::evidence_commitment(
+            &wasm_hash,
+            &input_hash,
+            &output_hash,
+            &settlement_commitment,
+        );
+        let provider_identity = "provider.testnet".to_string();
+        let receipt_id = hashing::receipt_id(&provider_identity, nonce, &evidence);
+        let mut receipt = ReceiptV1 {
+            receipt_id,
+            schema_version: 1,
+            provider_identity,
+            work_category: "ai_acceptance_validation".to_string(),
+            outcome: WorkOutcome::Pass,
+            verifier_measurement: parsed_quote.measurements.digest(),
+            wasm_hash,
+            input_hash,
+            output_hash,
+            evidence_commitment: evidence,
+            buyer_pubkey: buyer_sk.verifying_key().to_bytes(),
+            provider_pubkey: provider_sk.verifying_key().to_bytes(),
+            buyer_signature: [0u8; 64],
+            provider_signature: [0u8; 64],
+            nonce,
+            created_at,
+            confidential_settlement_commitment: settlement_commitment,
+            borrower_evm_address: [0x22u8; 20],
+            max_credit_principal,
+            attested_revenue,
+            consequence_state: ConsequenceState::RegisteredVerified,
+            foreign_chain_id: None,
+            foreign_tx_hash: None,
+            lender_id: None,
+            verified_finality_evidence: None,
+        };
+        let payload = receipt.signing_payload();
+        receipt.buyer_signature = sign_payload(
+            Party::Buyer,
+            buyer_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        receipt.provider_signature = sign_payload(
+            Party::Provider,
+            provider_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        (receipt, quote_bytes, task_meta)
+    }
+
     struct TestFixtures {
         contract: ReceiptRegistry,
         sign_root_secret: Scalar,
@@ -1334,6 +2199,7 @@ mod tests {
 
     #[allow(clippy::too_many_lines)]
     fn build_fixtures() -> TestFixtures {
+        rt::set_test_timestamp(1_771_590_000);
         setup_context("owner.testnet", 0);
         let vault_hex = "5555555555555555555555555555555555555555";
         let mut contract = ReceiptRegistry::new(
@@ -1341,6 +2207,8 @@ mod tests {
             Some("v1.signer-prod.testnet".parse().unwrap()),
             Some(vault_hex.to_string()),
         );
+        // Allow single-receipt legacy unit fixture tests unless overridden in multi-payer tests
+        contract.set_underwriting_policy(U128(250_000_000), 1);
 
         // Configure deterministic test MPC root keys for domain 0 (Sign) and domain 3 (ForeignTx)
         let sign_root_secret = Scalar::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
@@ -1424,6 +2292,7 @@ mod tests {
             confidential_settlement_commitment: settlement_commitment,
             borrower_evm_address: [0x22u8; 20],
             max_credit_principal: 250_000_000,
+            attested_revenue: 250_000_000,
             consequence_state: ConsequenceState::RegisteredVerified,
             foreign_chain_id: None,
             foreign_tx_hash: None,
@@ -1489,6 +2358,8 @@ mod tests {
             id_hex.clone(),
             borrower_hex.to_string(),
             U128(principal),
+            U128(5_000_000),
+            1_772_200_000,
             vault_hex.to_string(),
             deadline,
         );
@@ -1712,6 +2583,8 @@ mod tests {
             id_hex.clone(),
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1736,6 +2609,8 @@ mod tests {
             id_hex.clone(),
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1872,6 +2747,8 @@ mod tests {
             id_hex.clone(),
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1880,6 +2757,8 @@ mod tests {
             id_hex,
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1900,6 +2779,8 @@ mod tests {
             id_hex.clone(),
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1978,6 +2859,8 @@ mod tests {
             id_hex,
             "3333333333333333333333333333333333333333".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -1998,6 +2881,8 @@ mod tests {
             id_hex,
             "2222222222222222222222222222222222222222".to_string(),
             U128(250_000_001),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -2018,6 +2903,8 @@ mod tests {
             id_hex,
             "2222222222222222222222222222222222222222".to_string(),
             U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
             "5555555555555555555555555555555555555555".to_string(),
             1_800_000_000,
         );
@@ -2110,5 +2997,206 @@ mod tests {
 
         f.contract
             .register_receipt(f.receipt, f.quote_bytes, f.task_meta);
+    }
+
+    const ATTESTATION_3000_JSON: &str =
+        include_str!("../../receipt-core/tests/fixtures/outlayer_attestation_3000.json");
+
+    #[test]
+    fn advance_cap_enforces_1_5x_trailing_14d_revenue_and_fixed_cap() {
+        let mut f = build_fixtures();
+        setup_context("owner.testnet", 0);
+        f.contract.set_underwriting_policy(U128(5_000_000), 2);
+        rt::set_test_timestamp(1_771_590_000);
+
+        let buyer1 = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let buyer2 = Ed25519SigningKey::from_bytes(&[0x11u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+
+        let (r1, q1, tm1) = build_additional_signed_receipt(
+            &mut f.contract,
+            &buyer1,
+            &provider_sk,
+            ATTESTATION_1500_JSON,
+            10,
+            1_771_587_262,
+            1_000_000, // $1.00
+            10_000_000,
+        );
+        let (r2, q2, tm2) = build_additional_signed_receipt(
+            &mut f.contract,
+            &buyer2,
+            &provider_sk,
+            ATTESTATION_3000_JSON,
+            11,
+            1_771_588_000,
+            1_000_000, // $1.00 -> total = $2.00, 1.5x = $3.00 < fixed_cap $5.00
+            10_000_000,
+        );
+
+        setup_context("provider.testnet", 0);
+        let _ = f.contract.register_receipt(r1, q1, tm1);
+        let id2 = f.contract.register_receipt(r2, q2, tm2);
+
+        let rev = f
+            .contract
+            .get_trailing_14d_revenue("provider.testnet".into(), None);
+        assert_eq!(rev.total_revenue.0, 2_000_000);
+        assert_eq!(rev.distinct_payers, 2);
+        assert_eq!(rev.advance_cap.0, 3_000_000);
+
+        // Requesting 3_000_001 (> 1.5x $2.00 = $3.00) must panic
+        setup_context("provider.testnet", 1);
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            f.contract.authorize_loan(
+                id2.clone(),
+                "2222222222222222222222222222222222222222".into(),
+                U128(3_000_001),
+                U128(60_000),
+                1_772_200_000,
+                "5555555555555555555555555555555555555555".into(),
+                1_800_000_000,
+            );
+        }));
+        assert!(res.is_err());
+
+        // Requesting 3_000_000 succeeds
+        let _ = f.contract.authorize_loan(
+            id2,
+            "2222222222222222222222222222222222222222".into(),
+            U128(3_000_000),
+            U128(60_000),
+            1_772_200_000,
+            "5555555555555555555555555555555555555555".into(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    fn advance_cap_excludes_receipts_older_than_14_days() {
+        let mut f = build_fixtures();
+        setup_context("owner.testnet", 0);
+        f.contract.set_underwriting_policy(U128(5_000_000), 2);
+
+        let buyer1 = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let buyer2 = Ed25519SigningKey::from_bytes(&[0x11u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+
+        let (r1, q1, tm1) = build_additional_signed_receipt(
+            &mut f.contract,
+            &buyer1,
+            &provider_sk,
+            ATTESTATION_1500_JSON,
+            20,
+            1_770_000_000, // older than 14 days at t=1_771_590_000 (diff = 1,590,000 > 1,209,600)
+            4_000_000,
+            5_000_000,
+        );
+        let (r2, q2, tm2) = build_additional_signed_receipt(
+            &mut f.contract,
+            &buyer2,
+            &provider_sk,
+            ATTESTATION_3000_JSON,
+            21,
+            1_771_588_000,
+            2_000_000,
+            5_000_000,
+        );
+        setup_context("provider.testnet", 0);
+        let _ = f.contract.register_receipt(r1, q1, tm1);
+        let _ = f.contract.register_receipt(r2, q2, tm2);
+
+        rt::set_test_timestamp(1_771_590_000);
+        let rev = f
+            .contract
+            .get_trailing_14d_revenue("provider.testnet".into(), None);
+        assert_eq!(rev.eligible_receipts, 1);
+        assert_eq!(rev.distinct_payers, 1);
+        assert_eq!(rev.total_revenue.0, 2_000_000);
+        assert_eq!(rev.advance_cap.0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "insufficient distinct independent payers in trailing 14-day window")]
+    fn distinct_independent_payers_required_rejects_single_buyer_wash_trade() {
+        let mut f = build_fixtures();
+        setup_context("owner.testnet", 0);
+        f.contract.set_underwriting_policy(U128(5_000_000), 2);
+
+        let same_buyer = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+
+        let (r1, q1, tm1) = build_additional_signed_receipt(
+            &mut f.contract,
+            &same_buyer,
+            &provider_sk,
+            ATTESTATION_1500_JSON,
+            30,
+            1_771_587_262,
+            3_000_000,
+            5_000_000,
+        );
+        let (r2, q2, tm2) = build_additional_signed_receipt(
+            &mut f.contract,
+            &same_buyer,
+            &provider_sk,
+            ATTESTATION_3000_JSON,
+            31,
+            1_771_588_000,
+            3_000_000,
+            5_000_000,
+        );
+        setup_context("provider.testnet", 0);
+        let _ = f.contract.register_receipt(r1, q1, tm1);
+        let id2 = f.contract.register_receipt(r2, q2, tm2);
+
+        let rev = f
+            .contract
+            .get_trailing_14d_revenue("provider.testnet".into(), None);
+        assert_eq!(rev.distinct_payers, 1);
+        assert_eq!(rev.advance_cap.0, 0);
+
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id2,
+            "2222222222222222222222222222222222222222".into(),
+            U128(4_000_000),
+            U128(80_000),
+            1_772_200_000,
+            "5555555555555555555555555555555555555555".into(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "registry is paused by owner")]
+    fn paused_registry_rejects_authorize_loan() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("owner.testnet", 0);
+        f.contract.set_paused(true);
+        assert!(f.contract.is_paused());
+        assert_eq!(
+            f.contract
+                .compute_advance_cap("provider.testnet".into(), None)
+                .0,
+            0
+        );
+
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "2222222222222222222222222222222222222222".into(),
+            U128(100_000_000),
+            U128(2_000_000),
+            1_772_200_000,
+            "5555555555555555555555555555555555555555".into(),
+            1_800_000_000,
+        );
     }
 }

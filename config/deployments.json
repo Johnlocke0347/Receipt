@@ -40,6 +40,33 @@
         "draw_credit": "0xd3f56438675ba7871e8eda9bd8aef9a0e7ab397b8bf15f48a324eaccd741eb0b",
         "verify_loan_consequence": "7hDyG5sVPdYBPdmwWF7v5CQg9MLXAX7txS14qupGQQZe"
       }
+    },
+    "advance_flow_v3": {
+      "description": "Revenue-advance pilot with AgentPayoutProxy sweep, 1.5x trailing 14d cap, 2 distinct-buyer requirement, $5 hard cap, 3-tier first-loss pool, and MPC repayment",
+      "git_branch": "advance-flow",
+      "near_network": "testnet",
+      "near_registry_account": "receipt-advance-20261123.testnet",
+      "outlayer_worker_account": "worker.outlayer.testnet",
+      "mpc_signer_account": "v1.signer-prod.testnet",
+      "evm_network": "base-sepolia",
+      "evm_chain_id": 84532,
+      "derived_mpc_evm_signer": "0x52922c2dab12bfd5d692f713445c0c6b7fc9567f",
+      "credit_token_address": "0x86727613c06aa4e2ea9da0e60870c9707f661284",
+      "credit_token_symbol": "mcUSDC",
+      "vault_address": "0xeeb53bf1a753ecc9cfc82c00fa7f61f7df57dbda",
+      "agent_payout_proxy_address": "0xbaaf339444fbf398c0523e6b45991fe902e8c44c",
+      "evidence_tx": {
+        "outlayer_execution_1": "6x6BQse4Wo9wvxgKthcS5mDZ5LZiai3mHeASEcWcNnMo",
+        "outlayer_execution_2": "ERQKT4WZY8A9TS7b1ygmNvEndmfvYfey2JhBLfeBvZRe",
+        "register_receipt_1": "FjDa9BkuochEqjjoJjUmoTnG8PxGPC9MbyxFtpECU1pa",
+        "register_receipt_2": "27RHoz6JwsVTvBfH3R7v98KRmNaFbrVxoEUy6PiS3QbS",
+        "authorize_loan": "B4tRyX6Eync7kgjMEhybf273vRb6r5ZChJCy2nDzeHns",
+        "draw_credit": "0xaf8b3b2f3e834b1f44279a105a6ca3652fa4f6c469ce8b1a0f1088b165fe59ce",
+        "verify_loan_consequence": "DW5sGDw5TNpbvJRUonFWy1yA8FBvSzYsvAYhLwhSbeqh",
+        "x402_earn_transfer": "0xab5d9192535608538b0c5ebe3d4ba056212346109edfcc6aae95262c823cbbd3",
+        "sweep_agent_payout": "0xab2de771c0942ec9521fbee26ce019c78da52dd64bb0137a2abab99486621b91",
+        "verify_loan_repayment": "CKwmHPYTvG7JtMvyaZp8B6ss4qWDe4SEQzzVAhAGitVE"
+      }
     }
   },
   "mainnet_reference": {
