@@ -26,7 +26,7 @@ bs58 = "0.5"
 base64 = "0.22"
 sha3 = "0.10"
 dcap-qvl = { version = "0.3.11", default-features = false, features = ["contract", "borsh", "std", "rustcrypto"] }
-near-sdk = { version = "=5.7.0", default-features = false, features = ["legacy"] }
+near-sdk = { version = "=5.7.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -39,8 +39,8 @@ module_name_repetitions = "allow"
 doc_markdown = "allow"
 
 [profile.release]
-opt-level = "s"
-lto = true
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true

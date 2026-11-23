@@ -22,9 +22,13 @@ Concretely, for pilot partners on Base Sepolia: route your autonomous agent's in
 
 ---
 
-## One-Command Live Testnet Cycle (`borrow -> earn -> repay`)
+## One-Command Live Testnet Cycle & Partner Quickstart
 
-Run the full live end-to-end cycle on **NEAR Testnet + Base Sepolia** (with checkpointing at `artifacts/advance_cycle_checkpoint.json` and `.env` holding `NEAR_PRIVATE_KEY`, `BASE_SEPOLIA_RPC_URL`, `BASE_SEPOLIA_PRIVATE_KEY`):
+For outside builders with no author keys or prebuilt artifacts, start with **[`PARTNER_QUICKSTART.md`](./PARTNER_QUICKSTART.md)**:
+* **Zero-key live replay (~1 min):** `uv run python -m receipt_orchestrator.partner_quickstart --replay`
+* **Isolated BYO testnet wallet (< 15 min):** `PARTNER_BASE_SEPOLIA_KEY=0x... uv run python -m receipt_orchestrator.partner_quickstart --live --build-wasm`
+
+For the project maintainer script (requires `cargo build --release -p near-receipt-registry --target wasm32-unknown-unknown`, `.env` credentials `NEAR_PRIVATE_KEY`, `BASE_SEPOLIA_RPC_URL`, `BASE_SEPOLIA_PRIVATE_KEY`, and a fresh `NEAR_ADVANCE_REGISTRY_ACCOUNT_ID` not already owned by another key):
 
 ```bash
 uv run python -m receipt_orchestrator.advance_cycle

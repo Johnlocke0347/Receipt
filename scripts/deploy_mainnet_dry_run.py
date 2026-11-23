@@ -15,18 +15,17 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
 from dotenv import dotenv_values
 
+from receipt_orchestrator.advance_cycle import resolve_registry_wasm_path
 from receipt_orchestrator.demo_e2e import (
     BASE_SEPOLIA_CHAIN_ID,
     DEPLOYMENTS_CONFIG_PATH,
     REPO_ROOT,
     VAULT_BIN_PATH,
-    WASM_REGISTRY_PATH,
     abi_word_address,
     abi_word_uint,
     keccak256,
@@ -164,6 +163,7 @@ def render_dry_run_report(
     hard_cap_units: int,
     evm_est: dict[str, Any],
     wasm_bytes: int,
+    wasm_filename: str = "near_receipt_registry_opt.wasm",
 ) -> str:
     """Format exact mainnet commands, safety configuration, and gas estimates."""
     near_storage_yocto = wasm_bytes * 10**19
@@ -200,7 +200,7 @@ def render_dry_run_report(
         ),
         "",
         "--- Compiled NEAR Registry Resource Footprint ---",
-        f"Compiled near_receipt_registry.wasm  : {wasm_bytes} bytes",
+        f"Compiled {wasm_filename:<27s} : {wasm_bytes} bytes",
         f"Required NEAR storage stake          : ~{near_storage_near:.4f} NEAR (1e-5 NEAR / byte)",
         "Init / sync / policy Tgas            : 30 Tgas + 100 Tgas + 30 Tgas (< 0.02 NEAR gas)",
         "",
@@ -208,7 +208,7 @@ def render_dry_run_report(
         "# 1. Deploy and initialize NEAR Mainnet registry",
         (
             f"near contract deploy {near_registry_target} "
-            "use-file target/wasm32-unknown-unknown/release/near_receipt_registry.wasm "
+            f"use-file target/wasm32-unknown-unknown/release/{wasm_filename} "
             "without-init-call network-config mainnet"
         ),
         (
@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         testnet_ref.get("derived_mpc_evm_signer")
         or "0x0000000000000000000000000000000000000001"
     )
-    wasm_path = Path(WASM_REGISTRY_PATH)
+    wasm_path, _ = resolve_registry_wasm_path()
     wasm_bytes = wasm_path.stat().st_size
 
     evm_est = estimate_base_sepolia_deployment(
@@ -333,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         hard_cap_units=int(args.hard_cap_units),
         evm_est=evm_est,
         wasm_bytes=wasm_bytes,
+        wasm_filename=wasm_path.name,
     )
     print(report, flush=True)
     return 0

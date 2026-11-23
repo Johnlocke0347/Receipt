@@ -14,6 +14,7 @@
 ## Status
 
 * **Environment:** Testnet prototype only (**NEAR Testnet** + **Base Sepolia** with **`MockCreditUSDC`**).
+* **Live Cycle:** **Self-run testnet cycle: receipts, buyers and payout simulated by the project author** (not external design-partner traffic or live customer funds).
 * **Users:** Zero external design partners or third-party borrower/lender capital.
 * **Security Audit:** **Unaudited.** Neither the Solidity vault/proxy nor the NEAR registry has been audited by an external security firm.
 * **Mainnet:** **Not deployed.** `scripts/deploy_mainnet_dry_run.py` strictly requires `--dry-run`, queries only Base Sepolia RPC for read-only gas estimation, and refuses mainnet broadcasts or mainnet keys.
@@ -47,7 +48,7 @@ Following confirmation from the NEAR organizers that post-submission updates are
 | **Distinct-independent-payer check** | **Yes** — live run registered 2 distinct buyer keys (`distinct_payers=2`); negative test (`distinct_independent_payers_required_rejects_single_buyer_wash_trade`) blocks single-buyer repeat farming | — | — |
 | **First-loss pool accounting (holdback + junior + senior)** | **Yes** — live `depositFirstLoss` (`$50`) + `depositSeniorLiquidity` (`$200`) + 40% junior fee yield share on repayment verified live & in `revm` | — | — |
 | **Repayment-history write-back in an ERC-8004-compatible form** | — | **Partial** — Base vault emits `Erc8004FeedbackPrepared` & exposes `getErc8004ReputationSummary` (live query returned `count=1, value=100, decimals=0`); NEAR exposes `get_erc8004_reputation_summary` | Cross-contract write call to an external live ERC-8004 Reputation Registry singleton |
-| **Default handling (`markDefaulted` + `verify_loan_default` freeze)** | **Yes (unit + `revm` tests)** — `default_waterfall_slashes_bond_and_junior_pool_and_freezes_near_credit` slashes holdback bond + junior reserve, emits `LoanDefaulted` at `logIndex 0`, updates NEAR to `DefaultedVerified`, and freezes borrower; *happy path ran live on testnet, default path verified in `revm` + NEAR unit tests* | — | — |
+| **Default handling (`markDefaulted` + `verify_loan_default` freeze)** | **Yes (unit + `revm` tests)** — `default_waterfall_slashes_bond_and_junior_pool_and_freezes_near_credit` slashes holdback bond + junior reserve, emits `LoanDefaulted` at `logIndex 0`, updates NEAR to `DefaultedVerified`, and freezes borrower (*live testnet default run is `planned`*) | — | — |
 | **Mainnet deploy script with `$5` hard cap and owner pause** | — | **Partial** — [`scripts/deploy_mainnet_dry_run.py`](./scripts/deploy_mainnet_dry_run.py) `--dry-run` verified against Base Sepolia RPC (`2,680,582` deploy gas estimate) and unit-tested for safety guards (`tests/test_advance_and_dry_run.py`) | Live mainnet deployment (disabled intentionally until external audit) |
 
 ---
@@ -111,26 +112,34 @@ All deployment metadata is stored in [`config/deployments.json`](./config/deploy
 
 ## Roadmap
 
-Every item not verified live on testnet or backed by external deployment is **planned**:
+Every item not verified live on testnet or backed by external deployment is **`planned`**:
 
+* **Live testnet execution of `markDefaulted` + `verify_loan_default`** — **`planned`** *(currently verified in Rust unit + `revm` cross-stack tests only)*
 * **Live external ERC-8004 Reputation Registry write-back contract call** — **`planned`** *(currently emits `Erc8004FeedbackPrepared` and serves summary views internally)*
-* **Live x402 facilitator middleware setting `payTo = AgentPayoutProxy`** — **`planned`** *(currently tested via direct ERC-20 transfer to the deployed `AgentPayoutProxy`)*
+* **Live x402 facilitator middleware setting `payTo = AgentPayoutProxy`** — **`planned`** *(currently simulated via direct ERC-20 transfer to the deployed `AgentPayoutProxy`)*
 * **Independent smart-contract & cryptographic security audit** — **`planned`**
 * **Live Base Mainnet + NEAR Mainnet deployment (real USDC, `$5` initial per-agent cap)** — **`planned`** *(dry-run script only today)*
 * **External LP & lender monitoring dashboard** — **`planned`**
 
 ---
 
-## Key Security & Threat Model Docs
+## Key Security & Quickstart Docs
 
+* [`PARTNER_QUICKSTART.md`](./PARTNER_QUICKSTART.md): Zero-key live on-chain replay (`--replay`) plus <15-minute isolated BYO-wallet testnet guide (`--live`).
 * [`THREAT_MODEL.md`](./THREAT_MODEL.md): TDX side-channels/freshness/replay, NEAR MPC Domain 0 & Domain 3 trust assumptions, Sybil/wash-trade revenue limits, smart-contract invariants, hardening regressions, and breakeven default math.
-* [`DESIGN_PARTNER.md`](./DESIGN_PARTNER.md): Exact ask for pilot partners, x402 `AgentPayoutProxy` integration flow, and one-command testnet reproduction.
+* [`DESIGN_PARTNER.md`](./DESIGN_PARTNER.md): Exact ask for pilot partners, x402 `AgentPayoutProxy` integration flow, and recorded live testnet hashes.
 * [`SECURITY-HARDENING.md`](./SECURITY-HARDENING.md): Detailed negative test proofs and commits for the 4 post-submission vulnerability fixes.
 * [`docs/OUTLAYER_TODO.md`](./docs/OUTLAYER_TODO.md): Notes on FastFS `wasm32-wasip1` vs GitHub-source builds and `wasm32-wasip2` worker limits.
 
 ---
 
 ## How to Reproduce
+
+### 0. Zero-Key Live Replay (Fastest Inspection)
+
+```bash
+uv run python -m receipt_orchestrator.partner_quickstart --replay
+```
 
 ### 1. Local Verification Suite (No Credentials Needed)
 
@@ -139,13 +148,13 @@ Every item not verified live on testnet or backed by external deployment is **pl
 # acceptance-verifier-wasm (8), near-receipt-registry (19), revm cross-stack (3)
 cargo test --workspace
 
-# Contract WASM release build + Clippy + formatting
+# Contract WASM build & size optimization (886,680 B -> 688,956 B Cargo -> 565,596 B wasm-opt / ~5.66 NEAR)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p near-receipt-registry --target wasm32-unknown-unknown -- -D warnings
-cargo build --release -p near-receipt-registry --target wasm32-unknown-unknown
+uv run python scripts/build_registry_wasm.py
 
-# Python checks and dry-run safety tests
+# Python checks, quickstart log/guard tests, and dry-run safety tests
 uv run ruff check src tests scripts
 uv run mypy src tests scripts
 uv run pytest -q

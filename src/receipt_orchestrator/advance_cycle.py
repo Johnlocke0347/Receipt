@@ -26,6 +26,7 @@ import os
 import struct
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -58,19 +59,35 @@ from receipt_orchestrator.demo_e2e import (
 
 DEFAULT_ADVANCE_REGISTRY_ACCOUNT = "receipt-advance-20261123.testnet"
 ADVANCE_CHECKPOINT_PATH = REPO_ROOT / "artifacts" / "advance_cycle_checkpoint.json"
+OPT_WASM_REGISTRY_PATH = WASM_REGISTRY_PATH.with_name("near_receipt_registry_opt.wasm")
 
 
-def load_advance_checkpoint() -> dict[str, Any]:
+def resolve_registry_wasm_path() -> tuple[Path, bool]:
+    """Return `(wasm_path, is_optimized)`, preferring `near_receipt_registry_opt.wasm`."""
+    if OPT_WASM_REGISTRY_PATH.exists():
+        return OPT_WASM_REGISTRY_PATH, True
+    if WASM_REGISTRY_PATH.exists():
+        return WASM_REGISTRY_PATH, False
+    raise FileNotFoundError(
+        f"Missing compiled NEAR registry WASM at {WASM_REGISTRY_PATH}. "
+        "Run `uv run python scripts/build_registry_wasm.py` or "
+        "`cargo build --release -p near-receipt-registry --target wasm32-unknown-unknown`."
+    )
+
+
+def load_advance_checkpoint(path: Path = ADVANCE_CHECKPOINT_PATH) -> dict[str, Any]:
     """Load persisted live cycle checkpoint state if present."""
-    if not ADVANCE_CHECKPOINT_PATH.exists():
+    if not path.exists():
         return {}
-    return cast(dict[str, Any], json.loads(ADVANCE_CHECKPOINT_PATH.read_text(encoding="utf-8")))
+    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
-def save_advance_checkpoint(state: dict[str, Any]) -> None:
+def save_advance_checkpoint(
+    state: dict[str, Any], path: Path = ADVANCE_CHECKPOINT_PATH
+) -> None:
     """Persist live cycle checkpoint state atomically."""
-    ADVANCE_CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ADVANCE_CHECKPOINT_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def compute_job_settlement_commitment(attested_revenue: int, label: str) -> bytes:
@@ -373,26 +390,29 @@ def _record_deployment_profile(state: dict[str, Any], registry_account: str) -> 
     DEPLOYMENTS_CONFIG_PATH.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
 
 
-def main() -> None:
+def run_advance_cycle(
+    *,
+    near_priv_key: str,
+    registry_account: str,
+    base_rpc_url: str,
+    base_priv_key: str,
+    token_override: str = "",
+    wasm_path: Path | None = None,
+    checkpoint_path: Path = ADVANCE_CHECKPOINT_PATH,
+    update_deployments: bool = True,
+) -> dict[str, Any]:
     """Execute the full live testnet borrow -> earn -> repay cycle and print all tx hashes."""
-    env = {**dotenv_values(REPO_ROOT / ".env"), **os.environ}
-    near_priv_key = (env.get("NEAR_PRIVATE_KEY") or "").strip()
-    registry_account = (
-        (env.get("NEAR_ADVANCE_REGISTRY_ACCOUNT_ID") or "").strip()
-        or DEFAULT_ADVANCE_REGISTRY_ACCOUNT
-    )
-    token_override = (env.get("BASE_CREDIT_TOKEN_ADDRESS") or "").strip()
-    base_rpc_url = (env.get("BASE_SEPOLIA_RPC_URL") or "").strip()
-    base_priv_key = (env.get("BASE_SEPOLIA_PRIVATE_KEY") or "").strip()
-
     if not (near_priv_key and base_rpc_url and base_priv_key):
         raise RuntimeError(
-            "Missing NEAR_PRIVATE_KEY, BASE_SEPOLIA_RPC_URL, or BASE_SEPOLIA_PRIVATE_KEY in .env"
+            "Missing NEAR_PRIVATE_KEY, BASE_SEPOLIA_RPC_URL, or BASE_SEPOLIA_PRIVATE_KEY"
         )
+
+    def _save(cur: dict[str, Any]) -> None:
+        save_advance_checkpoint(cur, checkpoint_path)
 
     ensure_near_account(registry_account, near_priv_key)
     borrower_evm = derive_evm_address_from_privkey(base_priv_key)
-    state = load_advance_checkpoint()
+    state = load_advance_checkpoint(checkpoint_path)
 
     print("=== RECEIPT LIVE X402 ADVANCE CYCLE (BORROW -> EARN -> REPAY) ===", flush=True)
     print(f"NEAR Registry (new) : {registry_account}", flush=True)
@@ -400,10 +420,11 @@ def main() -> None:
 
     # 1. Deploy NEAR ReceiptRegistry, sync TDX measurements, configure $5 cap & min 2 payers
     if not state.get("step1_deploy_wasm_tx"):
+        resolved_wasm, _ = resolve_registry_wasm_path() if wasm_path is None else (wasm_path, False)
         state["step1_deploy_wasm_tx"] = near_deploy_wasm(
-            registry_account, near_priv_key, WASM_REGISTRY_PATH.read_bytes()
+            registry_account, near_priv_key, resolved_wasm.read_bytes()
         )
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step1_init_tx"):
         try:
@@ -423,7 +444,7 @@ def main() -> None:
                 gas=30_000_000_000_000,
             )
             state["step1_init_tx"] = init_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step1_sync_tx"):
         sync_tx, _ = near_function_call(
@@ -435,7 +456,7 @@ def main() -> None:
             gas=100_000_000_000_000,
         )
         state["step1_sync_tx"] = sync_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step1_policy_tx"):
         pol_tx, _ = near_function_call(
@@ -447,7 +468,7 @@ def main() -> None:
             gas=30_000_000_000_000,
         )
         state["step1_policy_tx"] = pol_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     onchain_signer = cast(
         str, near_view_call(registry_account, "derive_vault_authorized_signer_evm_address", {})
@@ -470,7 +491,7 @@ def main() -> None:
             )
             state["step2_deploy_usdc_tx"] = usdc_tx
             state["mock_usdc_address"] = usdc_rcpt["contractAddress"]
-        save_advance_checkpoint(state)
+        _save(state)
     usdc_address = str(state["mock_usdc_address"])
 
     if not state.get("step2_deploy_vault_tx"):
@@ -493,7 +514,7 @@ def main() -> None:
         state["step2_deploy_vault_tx"] = vault_tx
         state["vault_address"] = vault_rcpt["contractAddress"]
         state["authorized_signer_evm"] = onchain_signer
-        save_advance_checkpoint(state)
+        _save(state)
     vault_address = str(state["vault_address"])
 
     if not state.get("step2_near_vault_tx"):
@@ -506,7 +527,7 @@ def main() -> None:
             gas=30_000_000_000_000,
         )
         state["step2_near_vault_tx"] = nv_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step2_approve_tx"):
         app_tx, _ = sign_and_send_evm_tx(
@@ -519,7 +540,7 @@ def main() -> None:
             gas_limit=100_000,
         )
         state["step2_approve_tx"] = app_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step2_first_loss_tx"):
         fl_tx, _ = sign_and_send_evm_tx(
@@ -530,7 +551,7 @@ def main() -> None:
             gas_limit=200_000,
         )
         state["step2_first_loss_tx"] = fl_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step2_senior_tx"):
         sl_tx, _ = sign_and_send_evm_tx(
@@ -541,7 +562,7 @@ def main() -> None:
             gas_limit=200_000,
         )
         state["step2_senior_tx"] = sl_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("step2_proxy_tx"):
         px_tx, _ = sign_and_send_evm_tx(
@@ -558,7 +579,7 @@ def main() -> None:
         )
         state["step2_proxy_tx"] = px_tx
         state["payout_proxy_address"] = "0x" + proxy_word[-20:].hex()
-        save_advance_checkpoint(state)
+        _save(state)
     proxy_address = str(state["payout_proxy_address"])
     print(
         f"[2] Base Vault + Proxy   token={usdc_address} vault={vault_address} "
@@ -577,7 +598,7 @@ def main() -> None:
             gas=30_000_000_000_000,
         )
         state["step3_pin_wasm_tx"] = pin_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     base_nonce = int(state.get("base_nonce") or int(time.time()))
     state["base_nonce"] = base_nonce
@@ -592,7 +613,7 @@ def main() -> None:
             out_tx, att = execute_outlayer_job(registry_account, near_priv_key, label, revenue_each)
             state[f"{label}_outlayer_tx"] = out_tx
             state[f"{label}_attestation"] = att
-            save_advance_checkpoint(state)
+            _save(state)
             if idx == 1:
                 time.sleep(2.0)
 
@@ -623,7 +644,7 @@ def main() -> None:
                 gas=150_000_000_000_000,
             )
             state[f"{label}_register_tx"] = reg_tx
-            save_advance_checkpoint(state)
+            _save(state)
 
     cap_view = cast(
         dict[str, Any],
@@ -677,7 +698,7 @@ def main() -> None:
             deposit=1,
         )
         state["borrow_authorize_tx"] = auth_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     loan_packet = cast(
         dict[str, Any],
@@ -711,7 +732,7 @@ def main() -> None:
         state["borrow_draw_tx"] = draw_tx
         state["borrow_draw_block_hash"] = draw_rcpt["blockHash"]
         state["borrow_draw_log0"] = draw_rcpt["logs"][0]
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("borrow_verify_tx"):
         time.sleep(6.0)
@@ -733,7 +754,7 @@ def main() -> None:
             deposit=1,
         )
         state["borrow_verify_tx"] = verify_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     _poll_near_view(
         registry_account,
@@ -760,7 +781,7 @@ def main() -> None:
             gas_limit=120_000,
         )
         state["earn_transfer_tx"] = earn_tx
-        save_advance_checkpoint(state)
+        _save(state)
     print(f"[5] EARN ($6.00 x402 USDC -> PayoutProxy)  tx={state['earn_transfer_tx']}", flush=True)
 
     # 6. REPAY AT SOURCE: sweepAgentPayout -> skim $4.08, release $0.20 bond, forward $2.12 net
@@ -775,7 +796,7 @@ def main() -> None:
         state["repay_sweep_tx"] = sweep_tx
         state["repay_sweep_block_hash"] = sweep_rcpt["blockHash"]
         state["repay_sweep_log0"] = sweep_rcpt["logs"][0]
-        save_advance_checkpoint(state)
+        _save(state)
 
     if not state.get("repay_verify_tx"):
         time.sleep(6.0)
@@ -797,7 +818,7 @@ def main() -> None:
             deposit=1,
         )
         state["repay_verify_tx"] = repay_v_tx
-        save_advance_checkpoint(state)
+        _save(state)
 
     final_receipt = cast(
         dict[str, Any],
@@ -826,7 +847,8 @@ def main() -> None:
     evm_val = int.from_bytes(evm_rep_bytes[32:64], "big", signed=True)
     evm_dec = int.from_bytes(evm_rep_bytes[64:96], "big")
 
-    _record_deployment_profile(state, registry_account)
+    if update_deployments:
+        _record_deployment_profile(state, registry_account)
     print(
         f"[6] REPAY AT SOURCE ($4.08 skimmed, $2.12 forwarded)  "
         f"sweep={state['repay_sweep_tx']} verify={state['repay_verify_tx']}",
@@ -840,6 +862,22 @@ def main() -> None:
         f"    base_erc8004_summary       = (count={evm_count}, value={evm_val}, "
         f"decimals={evm_dec})",
         flush=True,
+    )
+    return state
+
+
+def main() -> None:
+    """CLI entrypoint reading `.env` / environment and running the live advance cycle."""
+    env = {**dotenv_values(REPO_ROOT / ".env"), **os.environ}
+    run_advance_cycle(
+        near_priv_key=(env.get("NEAR_PRIVATE_KEY") or "").strip(),
+        registry_account=(
+            (env.get("NEAR_ADVANCE_REGISTRY_ACCOUNT_ID") or "").strip()
+            or DEFAULT_ADVANCE_REGISTRY_ACCOUNT
+        ),
+        base_rpc_url=(env.get("BASE_SEPOLIA_RPC_URL") or "").strip(),
+        base_priv_key=(env.get("BASE_SEPOLIA_PRIVATE_KEY") or "").strip(),
+        token_override=(env.get("BASE_CREDIT_TOKEN_ADDRESS") or "").strip(),
     )
 
 
