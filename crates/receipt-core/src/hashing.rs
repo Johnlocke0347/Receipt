@@ -2,8 +2,12 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::receipt::WorkOutcome;
+
 /// Domain tag for the confidential settlement commitment.
 pub const CONFIDENTIAL_DOMAIN: &[u8] = b"RECEIPT_CONFIDENTIAL_V1";
+/// Domain tag for the outcome-committed enclave output hash.
+pub const ENCLAVE_OUTPUT_DOMAIN: &[u8] = b"RECEIPT_OUTCOME_OUTPUT_V1";
 /// Domain tag for the evidence commitment.
 pub const EVIDENCE_DOMAIN: &[u8] = b"RECEIPT_EVIDENCE_V1";
 /// Domain tag for the receipt id.
@@ -35,6 +39,16 @@ pub fn confidential_settlement_commitment(
         &amount.to_le_bytes(),
         currency_hash,
         buyer_salt,
+    ])
+}
+
+/// `SHA256("RECEIPT_OUTCOME_OUTPUT_V1" || [outcome as u8] || raw_enclave_output_hash)`.
+#[must_use]
+pub fn enclave_output_hash(outcome: WorkOutcome, raw_enclave_output_hash: &[u8; 32]) -> [u8; 32] {
+    sha256_concat(&[
+        ENCLAVE_OUTPUT_DOMAIN,
+        &[outcome as u8],
+        raw_enclave_output_hash,
     ])
 }
 
@@ -91,6 +105,15 @@ mod tests {
         assert_ne!(
             confidential_settlement_commitment(&z, 1, &z, &z),
             confidential_settlement_commitment(&z, 2, &z, &z)
+        );
+    }
+
+    #[test]
+    fn outcome_changes_enclave_output_hash() {
+        let raw = [0xaa; 32];
+        assert_ne!(
+            enclave_output_hash(WorkOutcome::Pass, &raw),
+            enclave_output_hash(WorkOutcome::Fail, &raw)
         );
     }
 

@@ -1,0 +1,56 @@
+{
+  "deployments": {
+    "submission_2026_11_14": {
+      "description": "Original NEAR AI Hackathon submission snapshot (tag submission-2026-11-14, untouched for demo video)",
+      "git_tag": "submission-2026-11-14",
+      "near_network": "testnet",
+      "near_registry_account": "receipt-registry.testnet",
+      "outlayer_worker_account": "worker.outlayer.testnet",
+      "mpc_signer_account": "v1.signer-prod.testnet",
+      "evm_network": "base-sepolia",
+      "evm_chain_id": 84532,
+      "derived_mpc_evm_signer": "0x6cb5858d8310045e4f2caea4e1231e4980af4e4b",
+      "credit_token_address": "0x99ac11cf7b392d27074253937163ad1a82786e8a",
+      "credit_token_symbol": "mcUSDC",
+      "vault_address": "0xf59f9d39f5fb76880bdc64fbcb7613e770d195e8",
+      "evidence_tx": {
+        "register_receipt": "A5QEf2jnvB2nNCRVra249btAjt1h52TSV61AZ4bmQKBu",
+        "authorize_loan": "FNsbX3M42GhWhQewi8kKFcNWi2xgASW9kPcYBTq6LeBL",
+        "draw_credit": "0xf3ee1f5cfc78729821e7409dcecd31cfd29ae885dde5160435dd88ca9a708283",
+        "verify_loan_consequence": "3kgoyP8dr6nANZgzYmsrjp9PB3xPr29uD1oPTR25vJ6Y"
+      }
+    },
+    "hardening_v2": {
+      "description": "Post-submission security-hardened deployment with live FastFS wasm32-wasip1 self-verifier",
+      "git_branch": "hardening-post-submission",
+      "near_network": "testnet",
+      "near_registry_account": "receipt-v2-test-20261121.testnet",
+      "outlayer_worker_account": "worker.outlayer.testnet",
+      "mpc_signer_account": "v1.signer-prod.testnet",
+      "evm_network": "base-sepolia",
+      "evm_chain_id": 84532,
+      "derived_mpc_evm_signer": "0xd67bb565e3c9a79914a815b32a167d81607293d8",
+      "credit_token_address": "0x3c9b91c75f925fee4a136853151cfd169140d7b6",
+      "credit_token_symbol": "mcUSDC",
+      "vault_address": "0xfbef17bd16fcfafddc5836db9f70850068d881f4",
+      "evidence_tx": {
+        "outlayer_execution": "8xgZC4xEAVS29PGw8H5Qui5PA1Jgp8FM9263dHBpPuFp",
+        "register_receipt": "CJsK1Yri7zfZtrZ3orN74yNgcANsEUj9ifHLUeEiXFK4",
+        "authorize_loan": "3Bp7jC4iZrDnMAc8GFBXGFnzT9w1mawy7uETQpJR8TP2",
+        "draw_credit": "0xd3f56438675ba7871e8eda9bd8aef9a0e7ab397b8bf15f48a324eaccd741eb0b",
+        "verify_loan_consequence": "7hDyG5sVPdYBPdmwWF7v5CQg9MLXAX7txS14qupGQQZe"
+      }
+    }
+  },
+  "mainnet_reference": {
+    "near_network": "mainnet",
+    "mpc_signer_account": "v1.signer",
+    "outlayer_worker_account": "worker.outlayer.near",
+    "evm_network": "base-mainnet",
+    "evm_chain_id": 8453,
+    "credit_token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "credit_token_symbol": "USDC",
+    "hard_per_agent_cap_units": 5000000,
+    "status": "not_deployed_dry_run_only"
+  }
+}

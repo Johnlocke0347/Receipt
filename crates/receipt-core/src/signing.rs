@@ -200,6 +200,10 @@ pub struct ReceiptParams {
     pub output_hash: [u8; 32],
     /// Settlement commitment.
     pub confidential_settlement_commitment: [u8; 32],
+    /// Authorized borrower EVM address on the destination chain (`20` bytes).
+    pub borrower_evm_address: [u8; 20],
+    /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
+    pub max_credit_principal: u128,
     /// Replay nonce.
     pub nonce: u64,
     /// Creation time (UNIX seconds).
@@ -241,6 +245,8 @@ pub fn build_signed_receipt(
         nonce: params.nonce,
         created_at: params.created_at,
         confidential_settlement_commitment: params.confidential_settlement_commitment,
+        borrower_evm_address: params.borrower_evm_address,
+        max_credit_principal: params.max_credit_principal,
         consequence_state: ConsequenceState::RegisteredVerified,
         foreign_chain_id: None,
         foreign_tx_hash: None,
@@ -275,6 +281,8 @@ mod tests {
             input_hash: [2; 32],
             output_hash: [3; 32],
             confidential_settlement_commitment: [4; 32],
+            borrower_evm_address: [0x22; 20],
+            max_credit_principal: 250_000_000,
             nonce: 1,
             created_at: 1_700_000_000,
         }
@@ -370,6 +378,23 @@ mod tests {
         assert_eq!(
             verify_receipt_signatures(&r, CHAIN, REG),
             Err(ReceiptError::BadSignature("provider"))
+        );
+    }
+
+    #[test]
+    fn tampered_borrower_or_credit_limit_rejected_by_signature() {
+        let mut r_borrower = signed();
+        r_borrower.borrower_evm_address[0] ^= 0xff;
+        assert_eq!(
+            verify_receipt_signatures(&r_borrower, CHAIN, REG),
+            Err(ReceiptError::BadSignature("buyer"))
+        );
+
+        let mut r_limit = signed();
+        r_limit.max_credit_principal += 1;
+        assert_eq!(
+            verify_receipt_signatures(&r_limit, CHAIN, REG),
+            Err(ReceiptError::BadSignature("buyer"))
         );
     }
 

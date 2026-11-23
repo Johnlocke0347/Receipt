@@ -427,6 +427,8 @@ pub struct ReceiptRegistry {
     pub approved_measurements: BTreeMap<[u8; 32], Measurements>,
     /// Replay protection set over `(provider_pubkey, nonce)`.
     pub used_nonces: BTreeSet<([u8; 32], u64)>,
+    /// Replay protection set over consumed OutLayer TDX attestation `task_id`s.
+    pub consumed_task_ids: BTreeSet<u64>,
     /// Registered receipts keyed by `receipt_id`.
     pub receipts: BTreeMap<[u8; 32], ReceiptV1>,
     /// In-flight loan authorization requests awaiting `v1.signer-prod.testnet::sign`.
@@ -561,6 +563,12 @@ impl ReceiptRegistry {
         if self.receipts.contains_key(&receipt.receipt_id) {
             rt::panic_str("receipt_id already registered");
         }
+        if self.consumed_task_ids.contains(&outlayer_task_meta.task_id) {
+            rt::panic_str(&format!(
+                "outlayer task_id {} already consumed by a registered receipt",
+                outlayer_task_meta.task_id
+            ));
+        }
 
         let registry_account = rt::current_account_id();
         verify_receipt_signatures(&receipt, &self.near_chain_id, registry_account.as_str())
@@ -574,8 +582,14 @@ impl ReceiptRegistry {
         if outlayer_task_meta.input_hash != Some(receipt.input_hash) {
             rt::panic_str("outlayer_task_meta.input_hash does not match receipt.input_hash");
         }
-        if outlayer_task_meta.output_hash != receipt.output_hash {
-            rt::panic_str("outlayer_task_meta.output_hash does not match receipt.output_hash");
+        let expected_output_hash = receipt_core::hashing::enclave_output_hash(
+            receipt.outcome,
+            &outlayer_task_meta.output_hash,
+        );
+        if receipt.output_hash != expected_output_hash {
+            rt::panic_str(
+                "receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash",
+            );
         }
 
         let quote = TdxQuote::parse(&tdx_quote_bytes)
@@ -603,6 +617,7 @@ impl ReceiptRegistry {
             .unwrap_or_else(|e| rt::panic_str(&format!("TDX report_data task_hash mismatch: {e}")));
 
         self.used_nonces.insert(nonce_key);
+        self.consumed_task_ids.insert(outlayer_task_meta.task_id);
         receipt.consequence_state = ConsequenceState::RegisteredVerified;
         receipt.foreign_chain_id = None;
         receipt.foreign_tx_hash = None;
@@ -709,6 +724,12 @@ impl ReceiptRegistry {
     pub fn is_measurement_approved(&self, measurement_digest_hex: String) -> bool {
         let digest = decode_hex_array::<32>(&measurement_digest_hex, "measurement_digest_hex");
         self.approved_measurements.contains_key(&digest)
+    }
+
+    /// Check whether an OutLayer TDX attestation `task_id` has already been consumed.
+    #[must_use]
+    pub fn is_task_id_consumed(&self, task_id: u64) -> bool {
+        self.consumed_task_ids.contains(&task_id)
     }
 
     fn assert_owner(&self) {
@@ -905,6 +926,7 @@ impl ReceiptRegistry {
             expected_wasm_hashes: BTreeSet::new(),
             approved_measurements: BTreeMap::new(),
             used_nonces: BTreeSet::new(),
+            consumed_task_ids: BTreeSet::new(),
             receipts: BTreeMap::new(),
             pending_loan_requests: BTreeMap::new(),
             loan_authorizations: BTreeMap::new(),
@@ -959,11 +981,22 @@ impl ReceiptRegistry {
         let Some(receipt) = self.receipts.get_mut(&receipt_id) else {
             rt::panic_str("receipt not found");
         };
+        if rt::predecessor_account_id().as_str() != receipt.provider_identity {
+            rt::panic_str("only receipt.provider_identity may call authorize_loan");
+        }
         if receipt.outcome != WorkOutcome::Pass {
             rt::panic_str("only PASS receipts can authorize loans");
         }
         if receipt.consequence_state != ConsequenceState::RegisteredVerified {
             rt::panic_str("receipt is not in RegisteredVerified state");
+        }
+        if borrower != receipt.borrower_evm_address {
+            rt::panic_str(
+                "borrower_evm_address does not match co-signed receipt.borrower_evm_address",
+            );
+        }
+        if principal > receipt.max_credit_principal {
+            rt::panic_str("principal_amount exceeds co-signed receipt.max_credit_principal");
         }
 
         let eip712_digest = eip712_loan_authorization_digest(
@@ -1349,7 +1382,7 @@ mod tests {
 
         let wasm_hash = task_meta.wasm_hash.unwrap();
         let input_hash = task_meta.input_hash.unwrap();
-        let output_hash = task_meta.output_hash;
+        let output_hash = hashing::enclave_output_hash(WorkOutcome::Pass, &task_meta.output_hash);
         contract.add_expected_wasm_hash(hex::encode(wasm_hash));
 
         // Build and co-sign ReceiptV1 bound to genuine OutLayer quote 1500
@@ -1389,6 +1422,8 @@ mod tests {
             nonce,
             created_at: 1_771_587_262,
             confidential_settlement_commitment: settlement_commitment,
+            borrower_evm_address: [0x22u8; 20],
+            max_credit_principal: 250_000_000,
             consequence_state: ConsequenceState::RegisteredVerified,
             foreign_chain_id: None,
             foreign_tx_hash: None,
@@ -1924,5 +1959,156 @@ mod tests {
             forged_log,
             EvmFinality::Finalized,
         );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "borrower_evm_address does not match co-signed receipt.borrower_evm_address"
+    )]
+    fn authorize_loan_rejects_mismatched_borrower_address() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "3333333333333333333333333333333333333333".to_string(),
+            U128(100_000_000),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "principal_amount exceeds co-signed receipt.max_credit_principal")]
+    fn authorize_loan_rejects_principal_exceeding_receipt_credit_limit() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("provider.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "2222222222222222222222222222222222222222".to_string(),
+            U128(250_000_001),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only receipt.provider_identity may call authorize_loan")]
+    fn authorize_loan_rejects_non_provider_caller() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        let id_hex = f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        setup_context("attacker.testnet", 1);
+        let _ = f.contract.authorize_loan(
+            id_hex,
+            "2222222222222222222222222222222222222222".to_string(),
+            U128(100_000_000),
+            "5555555555555555555555555555555555555555".to_string(),
+            1_800_000_000,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "outlayer task_id 1500 already consumed by a registered receipt")]
+    fn replayed_quote_task_id_with_fresh_nonce_rejected() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+        f.contract.register_receipt(
+            f.receipt.clone(),
+            f.quote_bytes.clone(),
+            f.task_meta.clone(),
+        );
+        assert!(f.contract.is_task_id_consumed(f.task_meta.task_id));
+
+        let buyer_sk = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+        let mut replayed = f.receipt;
+        replayed.nonce = 2;
+        replayed.receipt_id = hashing::receipt_id(
+            &replayed.provider_identity,
+            replayed.nonce,
+            &replayed.evidence_commitment,
+        );
+        let payload = replayed.signing_payload();
+        replayed.buyer_signature = sign_payload(
+            Party::Buyer,
+            &buyer_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        replayed.provider_signature = sign_payload(
+            Party::Provider,
+            &provider_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+
+        f.contract
+            .register_receipt(replayed, f.quote_bytes, f.task_meta);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "receipt.output_hash does not commit receipt.outcome into outlayer_task_meta.output_hash"
+    )]
+    fn fail_committed_enclave_output_hash_rejected_when_claiming_pass() {
+        let mut f = build_fixtures();
+        setup_context("provider.testnet", 0);
+
+        let buyer_sk = Ed25519SigningKey::from_bytes(&[0x10u8; 32]);
+        let provider_sk = Ed25519SigningKey::from_bytes(&[0x20u8; 32]);
+
+        let fail_output_hash =
+            hashing::enclave_output_hash(WorkOutcome::Fail, &f.task_meta.output_hash);
+        let evidence = hashing::evidence_commitment(
+            &f.receipt.wasm_hash,
+            &f.receipt.input_hash,
+            &fail_output_hash,
+            &f.receipt.confidential_settlement_commitment,
+        );
+        f.receipt.output_hash = fail_output_hash;
+        f.receipt.evidence_commitment = evidence;
+        f.receipt.receipt_id =
+            hashing::receipt_id(&f.receipt.provider_identity, f.receipt.nonce, &evidence);
+        f.receipt.outcome = WorkOutcome::Pass;
+        let payload = f.receipt.signing_payload();
+        f.receipt.buyer_signature = sign_payload(
+            Party::Buyer,
+            &buyer_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+        f.receipt.provider_signature = sign_payload(
+            Party::Provider,
+            &provider_sk,
+            "testnet",
+            "receipt-registry.testnet",
+            &payload,
+        )
+        .unwrap();
+
+        f.contract
+            .register_receipt(f.receipt, f.quote_bytes, f.task_meta);
     }
 }
