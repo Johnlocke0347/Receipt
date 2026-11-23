@@ -54,6 +54,7 @@ OUTLAYER_WASIP1_WASM_HASH = "9465bd664f1cfa7ce54731ba4b5c411b4444ebde9064351b5e2
 OUTLAYER_API_BASE = "https://testnet-api.outlayer.ai"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEPLOYMENTS_CONFIG_PATH = REPO_ROOT / "config" / "deployments.json"
 CHECKPOINT_PATH = REPO_ROOT / "artifacts" / "phase3_v2_checkpoint.json"
 WASM_REGISTRY_PATH = (
     REPO_ROOT / "target" / "wasm32-unknown-unknown" / "release" / "near_receipt_registry.wasm"
@@ -711,13 +712,26 @@ def build_and_sign_receipt_v1(
 # ---------------------------------------------------------------------------
 
 
+def load_deployment_config(profile: str = "hardening_v2") -> dict[str, Any]:
+    """Load deployment addresses from config/deployments.json when present."""
+    if not DEPLOYMENTS_CONFIG_PATH.exists():
+        return {}
+    raw = cast(dict[str, Any], json.loads(DEPLOYMENTS_CONFIG_PATH.read_text(encoding="utf-8")))
+    deployments = cast(dict[str, Any], raw.get("deployments", {}))
+    return cast(dict[str, Any], deployments.get(profile, {}))
+
+
 def main() -> None:
     """Execute Phase 3 end-to-end deployment and cross-chain verification with checkpointing."""
     env = dotenv_values(REPO_ROOT / ".env")
+    profile_cfg = load_deployment_config("hardening_v2")
     near_priv_key = env.get("NEAR_PRIVATE_KEY") or ""
-    registry_account = (env.get("NEAR_REGISTRY_ACCOUNT_ID") or "").strip() or (
-        DEFAULT_V2_REGISTRY_ACCOUNT
+    registry_account = (
+        (env.get("NEAR_REGISTRY_ACCOUNT_ID") or "").strip()
+        or str(profile_cfg.get("near_registry_account") or "").strip()
+        or DEFAULT_V2_REGISTRY_ACCOUNT
     )
+    token_override = (env.get("BASE_CREDIT_TOKEN_ADDRESS") or "").strip()
     base_rpc_url = env.get("BASE_SEPOLIA_RPC_URL") or ""
     base_priv_key = env.get("BASE_SEPOLIA_PRIVATE_KEY") or ""
 
@@ -798,13 +812,17 @@ def main() -> None:
     # STEP 2: Deploy MockCreditUSDC & ReceiptCreditVault on Base Sepolia
     # -----------------------------------------------------------------------
     if not state.get("step2_deploy_usdc_tx"):
-        usdc_bin = bytes.fromhex(MOCK_USDC_BIN_PATH.read_text(encoding="utf-8").strip())
-        usdc_init = usdc_bin + abi_word_uint(1_000_000_000_000)  # 1,000,000 mUSDC
-        usdc_tx, usdc_rcpt = sign_and_send_evm_tx(
-            base_rpc_url, base_priv_key, None, usdc_init, gas_limit=1_500_000
-        )
-        state["step2_deploy_usdc_tx"] = usdc_tx
-        state["mock_usdc_address"] = usdc_rcpt["contractAddress"]
+        if token_override:
+            state["step2_deploy_usdc_tx"] = "configured_external_token"
+            state["mock_usdc_address"] = token_override
+        else:
+            usdc_bin = bytes.fromhex(MOCK_USDC_BIN_PATH.read_text(encoding="utf-8").strip())
+            usdc_init = usdc_bin + abi_word_uint(1_000_000_000_000)  # 1,000,000 mUSDC
+            usdc_tx, usdc_rcpt = sign_and_send_evm_tx(
+                base_rpc_url, base_priv_key, None, usdc_init, gas_limit=1_500_000
+            )
+            state["step2_deploy_usdc_tx"] = usdc_tx
+            state["mock_usdc_address"] = usdc_rcpt["contractAddress"]
         save_checkpoint(state)
     usdc_address: str = state["mock_usdc_address"]
     print(
