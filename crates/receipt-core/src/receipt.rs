@@ -32,10 +32,18 @@ pub enum ConsequenceState {
     RegisteredVerified,
     /// A Base Sepolia loan authorization has been signed via Chain Signatures.
     LoanAuthorized,
-    /// `verify_foreign_transaction` is in flight.
+    /// `verify_foreign_transaction` is in flight for draw confirmation.
     VerificationPending,
-    /// MPC-verified loan consequence recorded.
+    /// MPC-verified loan disbursement consequence recorded (loan active/encumbered).
     ConsumedVerified,
+    /// `verify_foreign_transaction` is in flight for repayment confirmation.
+    RepaymentVerificationPending,
+    /// MPC-verified full loan repayment recorded (encumbrance cleared).
+    RepaidVerified,
+    /// `verify_foreign_transaction` is in flight for default confirmation.
+    DefaultVerificationPending,
+    /// MPC-verified loan default recorded (provider credit frozen).
+    DefaultedVerified,
     /// Terminal failure state.
     RejectedOrFailed,
 }
@@ -103,6 +111,8 @@ pub struct ReceiptSigningPayloadV1 {
     pub borrower_evm_address: [u8; 20],
     /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
     pub max_credit_principal: u128,
+    /// Attested net revenue from this settled work receipt (minimal credit token units, 6 decimals).
+    pub attested_revenue: u128,
 }
 
 /// The canonical receipt registered on the NEAR `ReceiptRegistry`.
@@ -158,6 +168,8 @@ pub struct ReceiptV1 {
     pub borrower_evm_address: [u8; 20],
     /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
     pub max_credit_principal: u128,
+    /// Attested net revenue from this settled work receipt (minimal credit token units, 6 decimals).
+    pub attested_revenue: u128,
     /// Lifecycle state.
     pub consequence_state: ConsequenceState,
     /// Foreign chain identifier (e.g. `eip155:84532`).
@@ -193,6 +205,7 @@ impl ReceiptV1 {
             confidential_settlement_commitment: self.confidential_settlement_commitment,
             borrower_evm_address: self.borrower_evm_address,
             max_credit_principal: self.max_credit_principal,
+            attested_revenue: self.attested_revenue,
         }
     }
 
@@ -207,9 +220,13 @@ impl ReceiptV1 {
         if self.outcome != WorkOutcome::Pass {
             return Err(ReceiptError::OutcomeNotPass);
         }
-        if self.borrower_evm_address == [0u8; 20] || self.max_credit_principal == 0 {
+        if self.borrower_evm_address == [0u8; 20]
+            || self.max_credit_principal == 0
+            || self.attested_revenue == 0
+        {
             return Err(ReceiptError::InvalidInput(
-                "borrower_evm_address and max_credit_principal must be non-zero".into(),
+                "borrower_evm_address, max_credit_principal, and attested_revenue must be non-zero"
+                    .into(),
             ));
         }
         let evidence = hashing::evidence_commitment(

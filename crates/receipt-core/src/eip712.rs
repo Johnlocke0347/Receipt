@@ -10,7 +10,7 @@ use sha3::{Digest, Keccak256};
 
 use crate::error::ReceiptError;
 use crate::hexser;
-use crate::mpc_foreign_tx::{loan_drawn_topic0, EvmLog};
+use crate::mpc_foreign_tx::{loan_defaulted_topic0, loan_drawn_topic0, loan_repaid_topic0, EvmLog};
 
 /// Base Sepolia chain ID (`84532`).
 pub const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
@@ -21,11 +21,11 @@ pub const EIP712_DOMAIN_TYPE_STR: &str =
     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)";
 /// EIP-712 domain name of `ReceiptCreditVault.sol`.
 pub const EIP712_DOMAIN_NAME: &str = "ReceiptCreditVault";
-/// EIP-712 domain version of `ReceiptCreditVault.sol`.
-pub const EIP712_DOMAIN_VERSION: &str = "1";
+/// EIP-712 domain version of `ReceiptCreditVault.sol` (v2 adds `feeAmount` & `maturityAt`).
+pub const EIP712_DOMAIN_VERSION: &str = "2";
 /// Canonical EIP-712 struct type string for loan authorization.
 pub const LOAN_AUTHORIZATION_TYPE_STR: &str =
-    "LoanAuthorization(bytes32 receiptId,address borrower,uint256 principal,bytes32 evidenceCommitment,uint256 deadline)";
+    "LoanAuthorization(bytes32 receiptId,address borrower,uint256 principal,uint256 feeAmount,uint64 maturityAt,bytes32 evidenceCommitment,uint256 deadline)";
 
 /// Signed loan authorization packet stored by `near-receipt-registry` and consumed by
 /// `ReceiptCreditVault.drawCredit` on Base Sepolia.
@@ -39,6 +39,10 @@ pub struct LoanAuthorizationPacket {
     pub borrower_evm_address: [u8; 20],
     /// Authorized loan principal in minimal credit token units (`uint256`).
     pub principal_amount: u128,
+    /// Fixed financing fee in minimal credit token units (`uint256`).
+    pub fee_amount: u128,
+    /// Loan maturity timestamp (UNIX seconds, `uint64`).
+    pub maturity_at: u64,
     /// Evidence commitment bound into the receipt (`bytes32`).
     #[serde(with = "hexser")]
     pub evidence_commitment: [u8; 32],
@@ -93,23 +97,27 @@ pub fn eip712_domain_separator(chain_id: u64, verifying_contract: &[u8; 20]) -> 
 }
 
 /// Compute the EIP-712 struct hash for `LoanAuthorization`:
-/// `keccak256(abi.encode(LOAN_AUTH_TYPEHASH, receiptId, borrower, principal, evidenceCommitment, deadline))`.
+/// `keccak256(abi.encode(LOAN_AUTH_TYPEHASH, receiptId, borrower, principal, feeAmount, maturityAt, evidenceCommitment, deadline))`.
 #[must_use]
 pub fn loan_authorization_struct_hash(
     receipt_id: &[u8; 32],
     borrower: &[u8; 20],
     principal: u128,
+    fee_amount: u128,
+    maturity_at: u64,
     evidence_commitment: &[u8; 32],
     deadline: u64,
 ) -> [u8; 32] {
     let type_hash = loan_authorization_typehash();
-    let mut encoded = [0u8; 192];
+    let mut encoded = [0u8; 256];
     encoded[0..32].copy_from_slice(&type_hash);
     encoded[32..64].copy_from_slice(receipt_id);
     encoded[76..96].copy_from_slice(borrower);
     encoded[112..128].copy_from_slice(&principal.to_be_bytes());
-    encoded[128..160].copy_from_slice(evidence_commitment);
-    encoded[184..192].copy_from_slice(&deadline.to_be_bytes());
+    encoded[144..160].copy_from_slice(&fee_amount.to_be_bytes());
+    encoded[184..192].copy_from_slice(&maturity_at.to_be_bytes());
+    encoded[192..224].copy_from_slice(evidence_commitment);
+    encoded[248..256].copy_from_slice(&deadline.to_be_bytes());
 
     Keccak256::digest(encoded).into()
 }
@@ -117,11 +125,14 @@ pub fn loan_authorization_struct_hash(
 /// Compute the 32-byte EIP-712 signing digest (`\x19\x01 || domainSeparator || structHash`)
 /// signed by NEAR Chain Signatures (`domain_id: 0`, path `"receipt-credit-vault-v1"`) and verified
 /// by `ReceiptCreditVault.drawCredit` on Base Sepolia.
+#[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn eip712_loan_authorization_digest(
     receipt_id: &[u8; 32],
     borrower: &[u8; 20],
     principal: u128,
+    fee_amount: u128,
+    maturity_at: u64,
     evidence_commitment: &[u8; 32],
     verifying_contract: &[u8; 20],
     chain_id: u64,
@@ -132,6 +143,8 @@ pub fn eip712_loan_authorization_digest(
         receipt_id,
         borrower,
         principal,
+        fee_amount,
+        maturity_at,
         evidence_commitment,
         deadline,
     );
@@ -303,6 +316,179 @@ pub fn verify_loan_drawn_log(
     Ok(lender_id)
 }
 
+/// Encode the `0x`-prefixed 96-byte ABI payload `abi.encode(uint256 a, uint256 b, bytes32 evidenceCommitment)`
+/// emitted by both `LoanRepaid` and `LoanDefaulted`.
+#[must_use]
+pub fn encode_two_u128_and_evidence_data(
+    a: u128,
+    b: u128,
+    evidence_commitment: &[u8; 32],
+) -> String {
+    let mut data = [0u8; 96];
+    data[16..32].copy_from_slice(&a.to_be_bytes());
+    data[48..64].copy_from_slice(&b.to_be_bytes());
+    data[64..96].copy_from_slice(evidence_commitment);
+    format!("0x{}", hex::encode(data))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_three_word_loan_event_log(
+    event_name: &'static str,
+    expected_topic0: [u8; 32],
+    log: &EvmLog,
+    expected_vault: &[u8; 20],
+    expected_tx_hash: &[u8; 32],
+    expected_block_hash: &[u8; 32],
+    expected_receipt_id: &[u8; 32],
+    expected_borrower: &[u8; 20],
+    expected_evidence_commitment: &[u8; 32],
+) -> Result<([u8; 32], u128, u128), ReceiptError> {
+    if log.removed {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log has removed=true"
+        )));
+    }
+    if &log.address.0 != expected_vault {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log address does not match configured vault"
+        )));
+    }
+    if &log.transaction_hash.0 != expected_tx_hash {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log transaction_hash mismatch"
+        )));
+    }
+    if &log.block_hash.0 != expected_block_hash {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log block_hash mismatch"
+        )));
+    }
+    if log.topics.len() != 4 {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log must have 4 topics, got {}",
+            log.topics.len()
+        )));
+    }
+    if log.topics[0].0 != expected_topic0 {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} topic0 signature mismatch"
+        )));
+    }
+    if &log.topics[1].0 != expected_receipt_id {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} topic1 (receiptId) mismatch"
+        )));
+    }
+    let mut expected_borrower_topic = [0u8; 32];
+    expected_borrower_topic[12..32].copy_from_slice(expected_borrower);
+    if log.topics[2].0 != expected_borrower_topic {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} topic2 (borrower) mismatch"
+        )));
+    }
+    let lender_id = log.topics[3].0;
+    if lender_id == [0u8; 32] {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} topic3 (lenderId) cannot be zero"
+        )));
+    }
+
+    let Some(raw_hex) = log.data.strip_prefix("0x") else {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} log.data must be 0x-prefixed lowercase hex"
+        )));
+    };
+    let data_bytes = hex::decode(raw_hex).map_err(|e| {
+        ReceiptError::InvalidInput(format!("invalid hex in {event_name} data: {e}"))
+    })?;
+    if data_bytes.len() != 96 {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} data must be 96 bytes, got {}",
+            data_bytes.len()
+        )));
+    }
+    if data_bytes[0..16] != [0u8; 16] || data_bytes[32..48] != [0u8; 16] {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} data u128 overflow in upper bytes"
+        )));
+    }
+    let word0 = u128::from_be_bytes(data_bytes[16..32].try_into().expect("16 bytes"));
+    let word1 = u128::from_be_bytes(data_bytes[48..64].try_into().expect("16 bytes"));
+    if &data_bytes[64..96] != expected_evidence_commitment {
+        return Err(ReceiptError::InvalidInput(format!(
+            "{event_name} data evidenceCommitment mismatch"
+        )));
+    }
+
+    Ok((lender_id, word0, word1))
+}
+
+/// Strictly verify an extracted `LoanRepaid` [`EvmLog`] and return `(lender_id, amount_paid, remaining_balance)`.
+///
+/// # Errors
+/// Returns [`ReceiptError::InvalidInput`] on any log mismatch or zero payment.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_loan_repaid_log(
+    log: &EvmLog,
+    expected_vault: &[u8; 20],
+    expected_tx_hash: &[u8; 32],
+    expected_block_hash: &[u8; 32],
+    expected_receipt_id: &[u8; 32],
+    expected_borrower: &[u8; 20],
+    expected_evidence_commitment: &[u8; 32],
+) -> Result<([u8; 32], u128, u128), ReceiptError> {
+    let (lender_id, amount_paid, remaining_balance) = verify_three_word_loan_event_log(
+        "LoanRepaid",
+        loan_repaid_topic0(),
+        log,
+        expected_vault,
+        expected_tx_hash,
+        expected_block_hash,
+        expected_receipt_id,
+        expected_borrower,
+        expected_evidence_commitment,
+    )?;
+    if amount_paid == 0 {
+        return Err(ReceiptError::InvalidInput(
+            "LoanRepaid amountPaid must be positive".into(),
+        ));
+    }
+    Ok((lender_id, amount_paid, remaining_balance))
+}
+
+/// Strictly verify an extracted `LoanDefaulted` [`EvmLog`] and return `(lender_id, unpaid_principal, first_loss_absorbed)`.
+///
+/// # Errors
+/// Returns [`ReceiptError::InvalidInput`] on any log mismatch or zero unpaid principal.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_loan_defaulted_log(
+    log: &EvmLog,
+    expected_vault: &[u8; 20],
+    expected_tx_hash: &[u8; 32],
+    expected_block_hash: &[u8; 32],
+    expected_receipt_id: &[u8; 32],
+    expected_borrower: &[u8; 20],
+    expected_evidence_commitment: &[u8; 32],
+) -> Result<([u8; 32], u128, u128), ReceiptError> {
+    let (lender_id, unpaid_principal, first_loss_absorbed) = verify_three_word_loan_event_log(
+        "LoanDefaulted",
+        loan_defaulted_topic0(),
+        log,
+        expected_vault,
+        expected_tx_hash,
+        expected_block_hash,
+        expected_receipt_id,
+        expected_borrower,
+        expected_evidence_commitment,
+    )?;
+    if unpaid_principal == 0 {
+        return Err(ReceiptError::InvalidInput(
+            "LoanDefaulted unpaidPrincipal must be positive".into(),
+        ));
+    }
+    Ok((lender_id, unpaid_principal, first_loss_absorbed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +507,8 @@ mod tests {
         let receipt_id = [0x11u8; 32];
         let borrower = [0x22u8; 20];
         let principal = 250_000_000u128; // 250 USDC (6 decimals)
+        let fee_amount = 5_000_000u128;
+        let maturity_at = 1_800_600_000u64;
         let evidence = [0x44u8; 32];
         let vault = [0x55u8; 20];
         let deadline = 1_800_000_000u64;
@@ -329,6 +517,8 @@ mod tests {
             &receipt_id,
             &borrower,
             principal,
+            fee_amount,
+            maturity_at,
             &evidence,
             &vault,
             BASE_SEPOLIA_CHAIN_ID,
@@ -348,6 +538,8 @@ mod tests {
             &receipt_id,
             &borrower,
             principal + 1,
+            fee_amount,
+            maturity_at,
             &evidence,
             &vault,
             BASE_SEPOLIA_CHAIN_ID,
@@ -428,5 +620,73 @@ mod tests {
             &[0x99u8; 32],
         )
         .is_err());
+    }
+
+    #[test]
+    fn verify_loan_repaid_and_defaulted_logs_enforce_all_fields() {
+        let vault = [0x11u8; 20];
+        let tx_hash = [0x22u8; 32];
+        let block_hash = [0x33u8; 32];
+        let receipt_id = [0x44u8; 32];
+        let borrower = [0x55u8; 20];
+        let lender_id = [0x66u8; 32];
+        let evidence = [0x77u8; 32];
+
+        let mut borrower_topic = [0u8; 32];
+        borrower_topic[12..32].copy_from_slice(&borrower);
+
+        let repaid_log = EvmLog {
+            removed: false,
+            log_index: 0,
+            transaction_index: 0,
+            transaction_hash: Hash256(tx_hash),
+            block_hash: Hash256(block_hash),
+            block_number: 12346,
+            address: Hash160(vault),
+            data: encode_two_u128_and_evidence_data(4_080_000, 0, &evidence),
+            topics: vec![
+                Hash256(loan_repaid_topic0()),
+                Hash256(receipt_id),
+                Hash256(borrower_topic),
+                Hash256(lender_id),
+            ],
+        };
+        let (lid, paid, rem) = verify_loan_repaid_log(
+            &repaid_log,
+            &vault,
+            &tx_hash,
+            &block_hash,
+            &receipt_id,
+            &borrower,
+            &evidence,
+        )
+        .unwrap();
+        assert_eq!(lid, lender_id);
+        assert_eq!(paid, 4_080_000);
+        assert_eq!(rem, 0);
+
+        let defaulted_log = EvmLog {
+            topics: vec![
+                Hash256(loan_defaulted_topic0()),
+                Hash256(receipt_id),
+                Hash256(borrower_topic),
+                Hash256(lender_id),
+            ],
+            data: encode_two_u128_and_evidence_data(4_000_000, 200_000, &evidence),
+            ..repaid_log.clone()
+        };
+        let (dlid, unpaid, absorbed) = verify_loan_defaulted_log(
+            &defaulted_log,
+            &vault,
+            &tx_hash,
+            &block_hash,
+            &receipt_id,
+            &borrower,
+            &evidence,
+        )
+        .unwrap();
+        assert_eq!(dlid, lender_id);
+        assert_eq!(unpaid, 4_000_000);
+        assert_eq!(absorbed, 200_000);
     }
 }

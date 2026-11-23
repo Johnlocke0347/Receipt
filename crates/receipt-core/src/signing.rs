@@ -204,6 +204,8 @@ pub struct ReceiptParams {
     pub borrower_evm_address: [u8; 20],
     /// Maximum credit principal (in minimal credit token units) authorized by this receipt.
     pub max_credit_principal: u128,
+    /// Attested net revenue from this settled work receipt (minimal credit token units, 6 decimals).
+    pub attested_revenue: u128,
     /// Replay nonce.
     pub nonce: u64,
     /// Creation time (UNIX seconds).
@@ -247,6 +249,7 @@ pub fn build_signed_receipt(
         confidential_settlement_commitment: params.confidential_settlement_commitment,
         borrower_evm_address: params.borrower_evm_address,
         max_credit_principal: params.max_credit_principal,
+        attested_revenue: params.attested_revenue,
         consequence_state: ConsequenceState::RegisteredVerified,
         foreign_chain_id: None,
         foreign_tx_hash: None,
@@ -283,6 +286,7 @@ mod tests {
             confidential_settlement_commitment: [4; 32],
             borrower_evm_address: [0x22; 20],
             max_credit_principal: 250_000_000,
+            attested_revenue: 250_000_000,
             nonce: 1,
             created_at: 1_700_000_000,
         }
